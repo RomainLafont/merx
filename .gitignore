@@ -1,1 +1,8 @@
 config.yaml
+.vscode/
+.codex
+.idea/
+
+# Go binaries
+*.exe
+/gateway-smoke
