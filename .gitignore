@@ -5,4 +5,4 @@ config.yaml
 
 # Go binaries
 *.exe
-/gateway-smoke
+*.test
