@@ -299,22 +299,24 @@ const statusConfig: Record<string, { color: string; label: string }> = {
   bridging:   { color: "bg-yellow-500/20 text-yellow-600",   label: "Bridging" },
   attesting:  { color: "bg-orange-500/20 text-orange-600",   label: "Attesting" },
   settled:    { color: "bg-success/20 text-success",          label: "Settled" },
-  refunding:  { color: "bg-purple-500/20 text-purple-400",    label: "Refunding" },
+  refunding:  { color: "bg-amber-500/20 text-amber-500",        label: "Refunding" },
   refunded:   { color: "bg-purple-500/20 text-purple-500",    label: "Refunded" },
 };
 
 function InvoiceRow({ invoice, chains, onRefunded }: { invoice: Invoice; chains: ChainInfo[]; onRefunded: () => void }) {
-  const displayStatus = invoice.refundTxHash
-    ? "refunded"        // destination mint done
-    : invoice.refundArcTxHash
-      ? "refunding"     // Arc burn done, waiting for destination
-      : invoice.status;
-  const cfg = statusConfig[displayStatus] ?? statusConfig.pending;
-  const isRefunded = displayStatus === "refunded" || displayStatus === "refunding";
   const [showRefund, setShowRefund] = useState(false);
   const [refundChainId, setRefundChainId] = useState(invoice.chainId);
   const [refunding, setRefunding] = useState(false);
   const [refundError, setRefundError] = useState("");
+  const [refundInitiated, setRefundInitiated] = useState(false);
+
+  const displayStatus = invoice.refundTxHash
+    ? "refunded"
+    : (invoice.refundArcTxHash || refundInitiated)
+      ? "refunding"
+      : invoice.status;
+  const cfg = statusConfig[displayStatus] ?? statusConfig.pending;
+  const isRefunded = displayStatus === "refunded" || displayStatus === "refunding";
 
   const sourceTxURL = invoice.txHash ? txExplorerURL(invoice.chainId, invoice.txHash) : null;
   const arcURL = invoice.arcTxHash ? arcTxURL(invoice.arcTxHash) : null;
@@ -327,6 +329,7 @@ function InvoiceRow({ invoice, chains, onRefunded }: { invoice: Invoice; chains:
     setRefundError("");
     try {
       await refund({ invoiceId: invoice.id, to: invoice.payerAddress ?? "", chainId: refundChainId, amount: invoice.amount });
+      setRefundInitiated(true);
       setShowRefund(false);
       onRefunded();
     } catch (err) {

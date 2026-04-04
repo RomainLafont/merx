@@ -8,9 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	merx "github.com/RomainLafont/merx"
 	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -22,40 +20,43 @@ func setupServerOffline(t *testing.T) *server {
 		t.Fatal(err)
 	}
 	signer := crypto.PubkeyToAddress(key.PublicKey)
-	paymasterABI, err := abi.JSON(strings.NewReader(payWithPermitABIJSON))
-	if err != nil {
-		t.Fatalf("parse paymaster ABI: %v", err)
-	}
 	depositForBurnABI, err := abi.JSON(strings.NewReader(depositForBurnABIJSON))
 	if err != nil {
 		t.Fatalf("parse depositForBurn ABI: %v", err)
 	}
-	receiveMessageABI, err := abi.JSON(strings.NewReader(receiveMessageABIJSON))
+	depositForBurnWithHookABI, err := abi.JSON(strings.NewReader(depositForBurnWithHookABIJSON))
 	if err != nil {
-		t.Fatalf("parse receiveMessage ABI: %v", err)
+		t.Fatalf("parse depositForBurnWithHook ABI: %v", err)
 	}
 	relayAndSupplyABI, err := abi.JSON(strings.NewReader(relayAndSupplyABIJSON))
 	if err != nil {
 		t.Fatalf("parse relayAndSupply ABI: %v", err)
 	}
 	return &server{
-		key:               key,
-		signer:            signer,
-		paymasterABI:      paymasterABI,
-		depositForBurnABI: depositForBurnABI,
-		receiveMessageABI: receiveMessageABI,
-		relayAndSupplyABI: relayAndSupplyABI,
-		invoices:          newInvoiceStore(filepath.Join(t.TempDir(), "invoices.json")),
+		key:                       key,
+		signer:                    signer,
+		depositForBurnABI:         depositForBurnABI,
+		depositForBurnWithHookABI: depositForBurnWithHookABI,
+		relayAndSupplyABI:         relayAndSupplyABI,
+		invoices:                  newInvoiceStore(filepath.Join(t.TempDir(), "invoices.json")),
 	}
 }
 
-// fakePaymaster is a dummy address used in tests.
-var fakePaymaster = common.HexToAddress("0x1111111111111111111111111111111111111111")
-
 func TestHandlePayTx(t *testing.T) {
-	// Temporarily register a fake paymaster for Unichain Sepolia.
-	merx.ShopPaymaster[1301] = fakePaymaster
-	defer delete(merx.ShopPaymaster, 1301)
+	// Load a minimal registry for the test.
+	loadedRegistry = &registry{
+		Chains: []registryChain{
+			{
+				Name:       "Unichain Sepolia",
+				ChainID:    1301,
+				CCTPDomain: 10,
+				Tokens: []tokenEntry{
+					{Symbol: "USDC", Decimals: 6, Address: "0x31d0220469e10c4E71834a79b1f276d740d3768F"},
+				},
+			},
+		},
+	}
+	defer func() { loadedRegistry = nil }()
 
 	s := setupServerOffline(t)
 
@@ -75,24 +76,27 @@ func TestHandlePayTx(t *testing.T) {
 	if resp.ChainID != 1301 {
 		t.Fatalf("unexpected chain_id: %d", resp.ChainID)
 	}
-	if resp.Amount != "1000000" {
-		t.Fatalf("unexpected amount: %s", resp.Amount)
+	if resp.To == "" {
+		t.Fatal("expected to address")
 	}
-	if resp.Deadline == "" {
-		t.Fatal("expected deadline")
+	if resp.Data == "" {
+		t.Fatal("expected calldata")
 	}
-	if resp.Permit.Spender != fakePaymaster.Hex() {
-		t.Fatalf("unexpected permit spender: %s", resp.Permit.Spender)
+	if resp.Value != "0" {
+		t.Fatalf("unexpected value: %s", resp.Value)
 	}
-	if resp.Permit.Domain.Name != "USDC" {
-		t.Fatalf("unexpected domain name: %s", resp.Permit.Domain.Name)
+	if resp.Approval.Amount != "1000000" {
+		t.Fatalf("unexpected approval amount: %s", resp.Approval.Amount)
 	}
-	if resp.Permit.Domain.ChainID != 1301 {
-		t.Fatalf("unexpected domain chain_id: %d", resp.Permit.Domain.ChainID)
+	if resp.Approval.Spender == "" {
+		t.Fatal("expected approval spender")
 	}
 }
 
 func TestHandlePayTx_Validation(t *testing.T) {
+	// No registry loaded — all chains unsupported.
+	loadedRegistry = nil
+
 	s := setupServerOffline(t)
 
 	tests := []struct {
@@ -107,7 +111,6 @@ func TestHandlePayTx_Validation(t *testing.T) {
 		{"invalid amount", "chain_id=1301&amount=abc", http.StatusBadRequest},
 		{"zero amount", "chain_id=1301&amount=0", http.StatusBadRequest},
 		{"negative amount", "chain_id=1301&amount=-1", http.StatusBadRequest},
-		{"no paymaster deployed", "chain_id=1301&amount=1000000", http.StatusBadRequest},
 	}
 
 	for _, tt := range tests {

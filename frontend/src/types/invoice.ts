@@ -5,6 +5,7 @@ export interface Invoice {
   amountHuman: string; // e.g. "100.00"
   chainId: number;
   description: string;
+  productId?: string;
   payerAddress?: string;
   status: "pending" | "paid" | "bridging" | "attesting" | "settled";
   txHash?: string;

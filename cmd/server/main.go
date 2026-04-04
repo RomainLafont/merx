@@ -36,8 +36,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const payWithPermitABIJSON = `[{"type":"function","name":"payWithPermit","inputs":[{"name":"owner","type":"address"},{"name":"amount","type":"uint256"},{"name":"deadline","type":"uint256"},{"name":"v","type":"uint8"},{"name":"r","type":"bytes32"},{"name":"s","type":"bytes32"},{"name":"maxFee","type":"uint256"}],"outputs":[]}]`
-
 // uniswapConfig mirrors the YAML structure in uniswap-api/config.yaml.
 type uniswapConfig struct {
 	APIKey         string `yaml:"uniswap_api_key"`
@@ -66,7 +64,7 @@ func loadUniswapConfig(path string) (*uniswapConfig, error) {
 
 const depositForBurnABIJSON = `[{"type":"function","name":"depositForBurn","inputs":[{"name":"amount","type":"uint256"},{"name":"destinationDomain","type":"uint32"},{"name":"mintRecipient","type":"bytes32"},{"name":"burnToken","type":"address"},{"name":"destinationCaller","type":"bytes32"},{"name":"maxFee","type":"uint256"},{"name":"minFinalityThreshold","type":"uint32"}],"outputs":[]}]`
 
-const receiveMessageABIJSON = `[{"type":"function","name":"receiveMessage","inputs":[{"name":"message","type":"bytes"},{"name":"attestation","type":"bytes"}],"outputs":[{"name":"success","type":"bool"}]}]`
+const depositForBurnWithHookABIJSON = `[{"type":"function","name":"depositForBurnWithHook","inputs":[{"name":"amount","type":"uint256"},{"name":"destinationDomain","type":"uint32"},{"name":"mintRecipient","type":"bytes32"},{"name":"burnToken","type":"address"},{"name":"destinationCaller","type":"bytes32"},{"name":"maxFee","type":"uint256"},{"name":"minFinalityThreshold","type":"uint32"},{"name":"hookData","type":"bytes"}],"outputs":[]}]`
 
 const relayAndSupplyABIJSON = `[{"type":"function","name":"relayAndSupply","inputs":[{"name":"message","type":"bytes"},{"name":"attestation","type":"bytes"},{"name":"beneficiary","type":"address"}],"outputs":[]}]`
 
@@ -136,8 +134,18 @@ func registryChainByID(chainID int) *registryChain {
 	return nil
 }
 
-func registryChainByIDUint64(chainID uint64) *registryChain {
-	return registryChainByID(int(chainID))
+// cctpDomainForChain looks up the CCTP domain for a given chain ID from the
+// loaded registry.
+func cctpDomainForChain(chainID int) (uint32, bool) {
+	if loadedRegistry == nil {
+		return 0, false
+	}
+	for _, c := range loadedRegistry.Chains {
+		if c.ChainID == chainID {
+			return uint32(c.CCTPDomain), true
+		}
+	}
+	return 0, false
 }
 
 // ---------------------------------------------------------------------------
@@ -314,15 +322,14 @@ func (u *uniswapProxy) forward(w http.ResponseWriter, path string, body []byte) 
 // ---------------------------------------------------------------------------
 
 type server struct {
-	key               *ecdsa.PrivateKey
-	signer            common.Address
-	arcOperatorKey    *ecdsa.PrivateKey // operator on ArcReceiver (0x2A94...)
-	paymasterABI      abi.ABI
-	depositForBurnABI abi.ABI
-	receiveMessageABI abi.ABI
-	relayAndSupplyABI abi.ABI
-	invoices          *invoiceStore
-	uniswap           *uniswapProxy
+	key                        *ecdsa.PrivateKey
+	signer                     common.Address
+	arcOperatorKey             *ecdsa.PrivateKey // operator on ArcReceiver (0x2A94...)
+	depositForBurnABI          abi.ABI
+	depositForBurnWithHookABI  abi.ABI
+	relayAndSupplyABI          abi.ABI
+	invoices                   *invoiceStore
+	uniswap                    *uniswapProxy
 }
 
 func main() {
@@ -355,17 +362,13 @@ func main() {
 
 	signer := crypto.PubkeyToAddress(key.PublicKey)
 
-	paymasterABI, err := abi.JSON(strings.NewReader(payWithPermitABIJSON))
-	if err != nil {
-		log.Fatalf("parse paymaster ABI: %v", err)
-	}
 	depositForBurnABI, err := abi.JSON(strings.NewReader(depositForBurnABIJSON))
 	if err != nil {
 		log.Fatalf("parse depositForBurn ABI: %v", err)
 	}
-	receiveMessageABI, err := abi.JSON(strings.NewReader(receiveMessageABIJSON))
+	depositForBurnWithHookABI, err := abi.JSON(strings.NewReader(depositForBurnWithHookABIJSON))
 	if err != nil {
-		log.Fatalf("parse receiveMessage ABI: %v", err)
+		log.Fatalf("parse depositForBurnWithHook ABI: %v", err)
 	}
 	relayAndSupplyABI, err := abi.JSON(strings.NewReader(relayAndSupplyABIJSON))
 	if err != nil {
@@ -391,15 +394,14 @@ func main() {
 	}
 
 	s := &server{
-		key:               key,
-		signer:            signer,
-		arcOperatorKey:    arcOpKey,
-		paymasterABI:      paymasterABI,
-		depositForBurnABI: depositForBurnABI,
-		receiveMessageABI: receiveMessageABI,
-		relayAndSupplyABI: relayAndSupplyABI,
-		invoices:          newInvoiceStore("invoices.json"),
-		uniswap:           uniProxy,
+		key:                       key,
+		signer:                    signer,
+		arcOperatorKey:            arcOpKey,
+		depositForBurnABI:         depositForBurnABI,
+		depositForBurnWithHookABI: depositForBurnWithHookABI,
+		relayAndSupplyABI:         relayAndSupplyABI,
+		invoices:                  newInvoiceStore("invoices.json"),
+		uniswap:                   uniProxy,
 	}
 
 	mux := http.NewServeMux()
@@ -706,6 +708,126 @@ func (s *server) handleEbookDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath)
 }
 
+// bridgeToArc bridges USDC to Arc via CCTPv2 with Forwarding Service.
+//
+// Flow:
+//  1. USDC.approve(TokenMessengerV2, amount) on source chain
+//  2. TokenMessengerV2.depositForBurn(amount, arcDomain, ...) on source chain
+//  3. Poll for forwarding completion (Forwarding Service mints on Arc)
+func (s *server) bridgeToArc(chainID int, amountStr string) {
+	rc := registryChainByID(chainID)
+	if rc == nil || rc.RPC == "" {
+		log.Printf("[cctp-bridge] no RPC for chain %d, skipping", chainID)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	ethClient, err := ethclient.DialContext(ctx, rc.RPC)
+	if err != nil {
+		log.Printf("[cctp-bridge] dial RPC: %v", err)
+		return
+	}
+	defer ethClient.Close()
+
+	chainIDBig, err := ethClient.ChainID(ctx)
+	if err != nil {
+		log.Printf("[cctp-bridge] get chain ID: %v", err)
+		return
+	}
+
+	auth, err := bind.NewKeyedTransactorWithChainID(s.key, chainIDBig)
+	if err != nil {
+		log.Printf("[cctp-bridge] create transactor: %v", err)
+		return
+	}
+	auth.Context = ctx
+
+	tokenMessenger := merx.TokenMessengerV2
+	// Mint directly to the merchant wallet on Arc.
+	mintRecipient := addressToBytes32(s.signer)
+
+	erc20ABI, _ := abi.JSON(strings.NewReader(`[{"type":"function","name":"approve","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]}]`))
+	depositForBurnABI, _ := abi.JSON(strings.NewReader(`[{"type":"function","name":"depositForBurn","inputs":[{"name":"amount","type":"uint256"},{"name":"destinationDomain","type":"uint32"},{"name":"mintRecipient","type":"bytes32"},{"name":"burnToken","type":"address"},{"name":"destinationCaller","type":"bytes32"},{"name":"maxFee","type":"uint256"},{"name":"minFinalityThreshold","type":"uint32"}],"outputs":[]}]`))
+
+	amount, ok := new(big.Int).SetString(amountStr, 10)
+	if !ok {
+		log.Printf("[cctp-bridge] invalid amount: %s", amountStr)
+		return
+	}
+
+	domain, ok := cctpDomainForChain(chainID)
+	if !ok {
+		log.Printf("[cctp-bridge] no CCTP domain for chain %d", chainID)
+		return
+	}
+
+	cctpUSDC := common.HexToAddress(usdcAddressForChain(chainID))
+
+	// Step 1: approve TokenMessengerV2 to spend USDC.
+	approveData, err := erc20ABI.Pack("approve", tokenMessenger, amount)
+	if err != nil {
+		log.Printf("[cctp-bridge] pack approve: %v", err)
+		return
+	}
+
+	approveTx, err := bind.NewBoundContract(cctpUSDC, erc20ABI, ethClient, ethClient, ethClient).RawTransact(auth, approveData)
+	if err != nil {
+		log.Printf("[cctp-bridge] approve tx: %v", err)
+		return
+	}
+	log.Printf("[cctp-bridge] approve broadcast: %s", approveTx.Hash().Hex())
+
+	receipt, err := bind.WaitMined(ctx, ethClient, approveTx)
+	if err != nil {
+		log.Printf("[cctp-bridge] approve wait: %v", err)
+		return
+	}
+	if receipt.Status != 1 {
+		log.Printf("[cctp-bridge] approve reverted")
+		return
+	}
+
+	// Step 2: depositForBurn — burns USDC on source chain, CCTP bridges to Arc.
+	burnData, err := depositForBurnABI.Pack("depositForBurn",
+		amount,
+		uint32(26),         // destinationDomain = Arc
+		mintRecipient,      // ArcReceiver on Arc
+		cctpUSDC,           // burnToken = USDC on source chain
+		common.Hash{},      // destinationCaller = permissionless (zero)
+		merx.DefaultMaxFee, // maxFee for CCTP forwarding
+		uint32(0),          // minFinalityThreshold = 0 (fast transfer)
+	)
+	if err != nil {
+		log.Printf("[cctp-bridge] pack depositForBurn: %v", err)
+		return
+	}
+
+	auth.Nonce = nil // fresh nonce after approve
+	burnTx, err := bind.NewBoundContract(tokenMessenger, depositForBurnABI, ethClient, ethClient, ethClient).RawTransact(auth, burnData)
+	if err != nil {
+		log.Printf("[cctp-bridge] depositForBurn tx: %v", err)
+		return
+	}
+	log.Printf("[cctp-bridge] depositForBurn broadcast: %s on domain %d", burnTx.Hash().Hex(), domain)
+
+	receipt, err = bind.WaitMined(ctx, ethClient, burnTx)
+	if err != nil {
+		log.Printf("[cctp-bridge] depositForBurn wait: %v", err)
+		return
+	}
+	if receipt.Status != 1 {
+		log.Printf("[cctp-bridge] depositForBurn reverted")
+		return
+	}
+
+	log.Printf("[cctp-bridge] CCTP burn complete, polling attestation...")
+
+	// Step 3: poll forwarding completion (Forwarding Service mints on Arc).
+	s.pollForwardingCompletion("bridge", domain, burnTx.Hash().Hex())
+}
+
 // ---------------------------------------------------------------------------
 // Uniswap proxy handlers
 // ---------------------------------------------------------------------------
@@ -835,14 +957,14 @@ func (s *server) handleBalances(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/pay-tx?chain_id=1301&amount=1000000 — returns the permit data
-// for the customer to sign off-chain, plus metadata.
+// GET /api/pay-tx?chain_id=1301&amount=1000000 — returns the calldata for
+// depositForBurnWithHook that the customer executes directly on TokenMessengerV2.
 //
 // Flow:
 //  1. Frontend calls GET /api/pay-tx
-//  2. Customer signs the EIP-2612 permit (off-chain, gasless)
-//  3. Frontend sends POST /api/pay with the signature
-//  4. Backend broadcasts payWithPermit tx and pays gas
+//  2. Customer approves USDC spend for TokenMessengerV2
+//  3. Customer calls depositForBurnWithHook (CCTP Forwarding Service mints on Arc)
+//  4. Frontend sends POST /api/pay with the txHash
 func (s *server) handlePayTx(w http.ResponseWriter, r *http.Request) {
 	chainIDStr := r.URL.Query().Get("chain_id")
 	amountStr := r.URL.Query().Get("amount")
@@ -852,14 +974,14 @@ func (s *server) handlePayTx(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chainID, err := strconv.ParseUint(chainIDStr, 10, 64)
+	chainID, err := strconv.Atoi(chainIDStr)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid chain_id: %s", chainIDStr)
 		return
 	}
 
-	rc := registryChainByIDUint64(chainID)
-	if rc == nil {
+	srcDomain, ok := cctpDomainForChain(chainID)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "unsupported chain_id: %d", chainID)
 		return
 	}
@@ -870,60 +992,69 @@ func (s *server) handlePayTx(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paymasterAddr, ok := merx.ShopPaymaster[chainID]
-	if !ok {
-		writeError(w, http.StatusBadRequest, "no ShopPaymaster deployed for chain_id %d", chainID)
-		return
-	}
-
-	usdcAddr := usdcAddressForChain(int(chainID))
+	usdcAddr := usdcAddressForChain(chainID)
 	if usdcAddr == "" {
 		writeError(w, http.StatusBadRequest, "no USDC address for chain %d", chainID)
 		return
 	}
-	usdc := common.HexToAddress(usdcAddr)
 
-	// Deadline: 1 hour from now.
-	deadline := big.NewInt(time.Now().Add(1 * time.Hour).Unix())
+	burnToken := common.HexToAddress(usdcAddr)
+	mintRecipient := addressToBytes32(s.signer) // shop wallet on Arc
+	var zeroCaller [32]byte
+
+	// Estimate forwarding fee for this route.
+	maxFee, err := estimateForwardingFee(r.Context(), srcDomain, merx.ArcDomain, amount)
+	if err != nil {
+		log.Printf("[pay-tx] fee estimation failed, using fallback: %v", err)
+		maxFee = merx.ForwardingMaxFee
+	}
+
+	calldata, err := s.depositForBurnWithHookABI.Pack("depositForBurnWithHook",
+		amount,
+		merx.ArcDomain,    // destinationDomain = Arc
+		mintRecipient,
+		burnToken,
+		zeroCaller,        // destinationCaller = permissionless
+		maxFee,
+		uint32(0),         // minFinalityThreshold
+		merx.ForwardingHookData,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "pack calldata: %v", err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, payTxResponse{
-		ChainID:  chainID,
-		Amount:   amount.String(),
-		Deadline: deadline.String(),
-		Permit: permitData{
-			Token:   usdc.Hex(),
-			Spender: paymasterAddr.Hex(),
-			Domain: permitDomain{
-				Name:              "USDC",
-				Version:           "2",
-				ChainID:           chainID,
-				VerifyingContract: usdc.Hex(),
-			},
+		To:      merx.TokenMessengerV2.Hex(),
+		Data:    hexutil.Encode(calldata),
+		ChainID: chainID,
+		Value:   "0",
+		MaxFee:  maxFee.String(),
+		Approval: approvalData{
+			Spender: merx.TokenMessengerV2.Hex(),
+			Token:   usdcAddr,
+			Amount:  amount.String(),
 		},
 	})
 }
 
 type payTxResponse struct {
-	ChainID  uint64     `json:"chain_id"`
-	Amount   string     `json:"amount"`
-	Deadline string     `json:"deadline"`
-	Permit   permitData `json:"permit"`
+	To       string       `json:"to"`
+	Data     string       `json:"data"`
+	ChainID  int          `json:"chain_id"`
+	Value    string       `json:"value"`
+	MaxFee   string       `json:"maxFee"`
+	Approval approvalData `json:"approval"`
 }
 
-type permitData struct {
-	Token   string       `json:"token"`
-	Spender string       `json:"spender"`
-	Domain  permitDomain `json:"domain"`
+type approvalData struct {
+	Spender string `json:"spender"`
+	Token   string `json:"token"`
+	Amount  string `json:"amount"`
 }
 
-type permitDomain struct {
-	Name              string `json:"name"`
-	Version           string `json:"version"`
-	ChainID           uint64 `json:"chain_id"`
-	VerifyingContract string `json:"verifying_contract"`
-}
-
-// POST /api/pay — receive the signed permit and broadcast payWithPermit.
+// POST /api/pay — the customer has already executed depositForBurnWithHook.
+// We record the payment and poll for forwarding completion in the background.
 func (s *server) handlePay(w http.ResponseWriter, r *http.Request) {
 	var req payRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -931,112 +1062,20 @@ func (s *server) handlePay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Owner == "" || req.Amount == "" || req.Deadline == "" || req.Signature == "" {
-		writeError(w, http.StatusBadRequest, "owner, amount, deadline, and signature are required")
+	if req.TxHash == "" || req.ChainID == 0 || req.Amount == "" || req.Owner == "" {
+		writeError(w, http.StatusBadRequest, "txHash, chainId, amount, and owner are required")
 		return
 	}
 
-	if req.ChainID == 0 {
-		writeError(w, http.StatusBadRequest, "chain_id is required")
-		return
-	}
-
-	paymasterAddr, ok := merx.ShopPaymaster[req.ChainID]
+	sourceDomain, ok := cctpDomainForChain(req.ChainID)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "no ShopPaymaster for chain_id %d", req.ChainID)
+		writeError(w, http.StatusBadRequest, "unsupported chainId: %d", req.ChainID)
 		return
 	}
 
-	payRC := registryChainByIDUint64(req.ChainID)
-	if payRC == nil || payRC.RPC == "" {
-		writeError(w, http.StatusBadRequest, "no RPC URL for chain_id %d", req.ChainID)
-		return
-	}
-	rpcURL := payRC.RPC
-
-	amount, ok := new(big.Int).SetString(req.Amount, 10)
-	if !ok || amount.Sign() <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid amount: %s", req.Amount)
-		return
-	}
-
-	deadline, ok := new(big.Int).SetString(req.Deadline, 10)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid deadline: %s", req.Deadline)
-		return
-	}
-
-	// Decode signature (65 bytes: r[32] + s[32] + v[1]).
-	sig, err := hexutil.Decode(req.Signature)
-	if err != nil || len(sig) != 65 {
-		writeError(w, http.StatusBadRequest, "invalid signature: expected 65 bytes hex")
-		return
-	}
-
-	// Split into v, r, s. go-ethereum returns v as 0/1; EIP-2612 expects 27/28.
-	v := sig[64]
-	if v < 27 {
-		v += 27
-	}
-	var rBytes, sBytes [32]byte
-	copy(rBytes[:], sig[:32])
-	copy(sBytes[:], sig[32:64])
-
-	owner := common.HexToAddress(req.Owner)
-	maxFee := merx.DefaultMaxFee
-
-	// ABI-encode payWithPermit(owner, amount, deadline, v, r, s, maxFee).
-	calldata, err := s.paymasterABI.Pack("payWithPermit",
-		owner,
-		amount,
-		deadline,
-		v,
-		rBytes,
-		sBytes,
-		maxFee,
-	)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "pack calldata: %v", err)
-		return
-	}
-
-	// Connect to RPC and broadcast.
-	ethClient, err := ethclient.DialContext(r.Context(), rpcURL)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "dial RPC: %v", err)
-		return
-	}
-	defer ethClient.Close()
-
-	chainIDBig, err := ethClient.ChainID(r.Context())
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "get chain ID: %v", err)
-		return
-	}
-
-	auth, err := bind.NewKeyedTransactorWithChainID(s.key, chainIDBig)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "create transactor: %v", err)
-		return
-	}
-	auth.Context = r.Context()
-
-	contract := bind.NewBoundContract(paymasterAddr, s.paymasterABI, ethClient, ethClient, ethClient)
-	tx, err := contract.RawTransact(auth, calldata)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "broadcast tx: %v", err)
-		return
-	}
-
-	txHash := tx.Hash().Hex()
-	payChain := registryChainByIDUint64(req.ChainID)
-	sourceDomain := uint32(0)
-	if payChain != nil {
-		sourceDomain = uint32(payChain.CCTPDomain)
-	}
-
-	// Create invoice now that the tx is broadcast.
-	amountHuman := fmt.Sprintf("%.2f", float64(amount.Int64())/1_000_000)
+	// Create an invoice for this payment.
+	amountInt, _ := new(big.Int).SetString(req.Amount, 10)
+	amountHuman := fmt.Sprintf("%.2f", float64(amountInt.Int64())/1_000_000)
 	inv := &Invoice{
 		ID:              uuid.New().String(),
 		MerchantAddress: s.signer.Hex(),
@@ -1044,53 +1083,140 @@ func (s *server) handlePay(w http.ResponseWriter, r *http.Request) {
 		PayerAddress:    req.Owner,
 		Amount:          req.Amount,
 		AmountHuman:     amountHuman,
-		ChainID:         int(req.ChainID),
+		ChainID:         req.ChainID,
 		Description:     req.Description,
 		Status:          "paid",
-		TxHash:          txHash,
+		TxHash:          req.TxHash,
 		CreatedAt:       time.Now(),
 	}
 	now := time.Now()
 	inv.PaidAt = &now
 	s.invoices.create(inv)
 
-	log.Printf("payment broadcast: tx=%s owner=%s chain=%d amount=%s invoice=%s", txHash, req.Owner, req.ChainID, req.Amount, inv.ID)
+	log.Printf("payment recorded: tx=%s owner=%s chain=%d amount=%s", req.TxHash, req.Owner, req.ChainID, req.Amount)
 
-	// Background: poll CCTP attestation, then self-relay receiveMessage on Arc.
-	go s.pollAndRelay(sourceDomain, txHash, inv.ID)
+	// Background: poll CCTP forwarding service for completion.
+	go s.pollForwardingCompletion("pay", sourceDomain, req.TxHash, inv.ID)
 
 	writeJSON(w, http.StatusCreated, payResponse{
-		TxHash:    txHash,
+		TxHash:    req.TxHash,
 		ChainID:   req.ChainID,
 		InvoiceID: inv.ID,
 	})
 }
 
-// pollAndRelay waits for the CCTP attestation, then calls
-// MessageTransmitter.receiveMessage on Arc to mint USDC to the shop wallet.
-// Updates invoice status along the way.
-func (s *server) pollAndRelay(sourceDomain uint32, txHash string, invoiceID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+// pollForwardingCompletion polls the CCTP attestation API until forwarding is
+// complete. Updates invoice status along the way if invoiceID is provided.
+func (s *server) pollForwardingCompletion(label string, sourceDomain uint32, txHash string, invoiceID ...string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	s.invoices.updateStatus(invoiceID, "bridging")
-	log.Printf("[relay] waiting for CCTP attestation: domain=%d tx=%s invoice=%s", sourceDomain, txHash, invoiceID)
-
-	s.invoices.updateStatus(invoiceID, "attesting")
-	message, attestation, err := s.pollCCTPAttestation(ctx, sourceDomain, txHash)
-	if err != nil {
-		log.Printf("[relay] %v", err)
-		return
+	invID := ""
+	if len(invoiceID) > 0 {
+		invID = invoiceID[0]
 	}
 
-	// Self-relay on Arc: call MessageTransmitter.receiveMessage.
-	relayTx, err := s.relayCCTP(ctx, merx.ArcRPCURL, big.NewInt(merx.ArcChainID), merx.MessageTransmitter, message, attestation)
-	if err != nil {
-		log.Printf("[relay] ERROR: %v", err)
-		return
+	if invID != "" {
+		s.invoices.updateStatus(invID, "bridging")
 	}
-	s.invoices.setArcTx(invoiceID, relayTx)
-	log.Printf("[relay] settled on Arc: tx=%s (source tx=%s) invoice=%s", relayTx, txHash, invoiceID)
+	log.Printf("[%s] waiting for forwarding completion: domain=%d tx=%s", label, sourceDomain, txHash)
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	attesting := false
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[%s] timeout waiting for forwarding: tx=%s", label, txHash)
+			return
+		case <-ticker.C:
+		}
+
+		_, _, status, err := s.fetchCCTPAttestation(ctx, sourceDomain, txHash)
+		if err != nil {
+			log.Printf("[%s] poll error: %v", label, err)
+			continue
+		}
+		if status == "" {
+			continue
+		}
+		if !attesting && status != "complete" && invID != "" {
+			s.invoices.updateStatus(invID, "attesting")
+			attesting = true
+		}
+		log.Printf("[%s] status=%s tx=%s", label, status, txHash)
+		if status == "complete" {
+			if invID != "" {
+				s.invoices.setArcTx(invID, txHash)
+			}
+			log.Printf("[%s] forwarding complete: tx=%s", label, txHash)
+			return
+		}
+	}
+}
+
+// pollRefundCompletion polls the CCTP attestation API for a refund and extracts
+// the forwarding tx hash when complete.
+func (s *server) pollRefundCompletion(invoiceID, arcTxHash string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	log.Printf("[refund] waiting for forwarding: tx=%s invoice=%s", arcTxHash, invoiceID)
+
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("[refund] timeout: tx=%s", arcTxHash)
+			return
+		case <-ticker.C:
+		}
+
+		// Fetch full attestation response to get forwardTxHash.
+		url := fmt.Sprintf("%s/%d?transactionHash=%s", merx.CCTPAttestationURL, merx.ArcDomain, arcTxHash)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("[refund] poll error: %v", err)
+			continue
+		}
+
+		var result struct {
+			Messages []struct {
+				Status       string `json:"status"`
+				ForwardState string `json:"forwardState"`
+				ForwardTxHash string `json:"forwardTxHash"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+
+		if len(result.Messages) == 0 {
+			continue
+		}
+
+		m := result.Messages[0]
+		log.Printf("[refund] status=%s forwardState=%s tx=%s", m.Status, m.ForwardState, arcTxHash)
+
+		if m.ForwardState == "FAILED" {
+			log.Printf("[refund] FAILED: forwarding service rejected tx=%s invoice=%s", arcTxHash, invoiceID)
+			return
+		}
+		if m.ForwardState == "COMPLETE" || m.ForwardState == "CONFIRMED" {
+			if invoiceID != "" {
+				if m.ForwardTxHash != "" {
+					s.invoices.setRefundTx(invoiceID, m.ForwardTxHash)
+				} else {
+					s.invoices.setRefundTx(invoiceID, arcTxHash)
+				}
+			}
+			log.Printf("[refund] complete: forwardState=%s forwardTx=%s invoice=%s", m.ForwardState, m.ForwardTxHash, invoiceID)
+			return
+		}
+	}
 }
 
 // pollCCTPAttestation polls the CCTP attestation API until status=complete,
@@ -1157,64 +1283,26 @@ func (s *server) fetchCCTPAttestation(ctx context.Context, sourceDomain uint32, 
 	return m.Message, m.Attestation, m.Status, nil
 }
 
-// relayCCTP calls MessageTransmitter.receiveMessage on the given chain.
-// Returns the relay tx hash.
-func (s *server) relayCCTP(ctx context.Context, rpcURL string, chainID *big.Int, transmitter common.Address, message, attestation string) (string, error) {
-	msgBytes, err := hexutil.Decode(message)
-	if err != nil {
-		return "", fmt.Errorf("decode message: %w", err)
-	}
-	attBytes, err := hexutil.Decode(attestation)
-	if err != nil {
-		return "", fmt.Errorf("decode attestation: %w", err)
-	}
-
-	calldata, err := s.receiveMessageABI.Pack("receiveMessage", msgBytes, attBytes)
-	if err != nil {
-		return "", fmt.Errorf("pack receiveMessage: %w", err)
-	}
-
-	ethClient, err := ethclient.DialContext(ctx, rpcURL)
-	if err != nil {
-		return "", fmt.Errorf("dial RPC: %w", err)
-	}
-	defer ethClient.Close()
-
-	auth, err := bind.NewKeyedTransactorWithChainID(s.key, chainID)
-	if err != nil {
-		return "", fmt.Errorf("create transactor: %w", err)
-	}
-	auth.Context = ctx
-
-	contract := bind.NewBoundContract(transmitter, s.receiveMessageABI, ethClient, ethClient, ethClient)
-	tx, err := contract.RawTransact(auth, calldata)
-	if err != nil {
-		return "", fmt.Errorf("broadcast receiveMessage: %w", err)
-	}
-
-	return tx.Hash().Hex(), nil
-}
 
 type payRequest struct {
-	Owner       string `json:"owner"`
-	ChainID     uint64 `json:"chain_id"`
+	TxHash      string `json:"txHash"`
+	ChainID     int    `json:"chainId"`
 	Amount      string `json:"amount"`
-	Deadline    string `json:"deadline"`
-	Signature   string `json:"signature"`
+	Owner       string `json:"owner"`
 	Description string `json:"description"`
 	ProductID   string `json:"productId"`
 }
 
 type payResponse struct {
-	TxHash    string `json:"tx_hash"`
-	ChainID   uint64 `json:"chain_id"`
-	InvoiceID string `json:"invoice_id"`
+	TxHash    string `json:"txHash"`
+	ChainID   int    `json:"chainId"`
+	InvoiceID string `json:"invoiceId"`
 }
 
 type refundRequest struct {
 	InvoiceID string `json:"invoiceId"`
 	To        string `json:"to"`
-	ChainID   uint64 `json:"chainId"`
+	ChainID   int    `json:"chainId"`
 	Amount    string `json:"amount"`
 }
 
@@ -1240,21 +1328,24 @@ func (s *server) handleRefund(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dstRC := registryChainByIDUint64(req.ChainID)
-	if dstRC == nil {
+	dstDomain, ok := cctpDomainForChain(req.ChainID)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "unsupported chainId: %d", req.ChainID)
 		return
 	}
-	dstDomain := uint32(dstRC.CCTPDomain)
-
-	if dstRC.RPC == "" {
-		writeError(w, http.StatusBadRequest, "no RPC URL for chainId %d", req.ChainID)
-		return
-	}
-	dstRPC := dstRC.RPC
 
 	recipient := common.HexToAddress(req.To)
 	ctx := r.Context()
+
+	// Estimate forwarding fee for this route.
+	maxFee, err := estimateForwardingFee(ctx, merx.ArcDomain, dstDomain, amount)
+	if err != nil {
+		log.Printf("[refund] fee estimation failed, using fallback: %v", err)
+		maxFee = merx.ForwardingMaxFee
+	}
+
+	// Send amount + fee so the customer receives the full amount.
+	burnAmount := new(big.Int).Add(amount, maxFee)
 
 	// Check shop USDC balance on Arc.
 	arcBalance, err := s.getArcUSDCBalance(ctx)
@@ -1262,27 +1353,28 @@ func (s *server) handleRefund(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "check balance: %v", err)
 		return
 	}
-	if arcBalance.Cmp(amount) < 0 {
-		writeError(w, http.StatusConflict, "insufficient USDC on Arc: have %s, need %s", arcBalance, amount)
+	if arcBalance.Cmp(burnAmount) < 0 {
+		writeError(w, http.StatusConflict, "insufficient USDC on Arc: have %s, need %s (includes %s fee)", arcBalance, burnAmount, maxFee)
 		return
 	}
 
-	// depositForBurn on Arc → customer's chain.
+	// depositForBurnWithHook on Arc → customer's chain via Forwarding Service.
 	mintRecipient := addressToBytes32(recipient)
 	burnToken := merx.TestnetUSDC[merx.ArcDomain]
 	var zeroCaller [32]byte
 
-	calldata, err := s.depositForBurnABI.Pack("depositForBurn",
-		amount,
+	calldata, err := s.depositForBurnWithHookABI.Pack("depositForBurnWithHook",
+		burnAmount,
 		dstDomain,
 		mintRecipient,
 		burnToken,
 		zeroCaller,
-		merx.DefaultMaxFee,
+		maxFee,
 		uint32(0), // minFinalityThreshold
+		merx.ForwardingHookData,
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "pack depositForBurn: %v", err)
+		writeError(w, http.StatusInternalServerError, "pack depositForBurnWithHook: %v", err)
 		return
 	}
 
@@ -1300,10 +1392,10 @@ func (s *server) handleRefund(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.Context = ctx
 
-	contract := bind.NewBoundContract(merx.TokenMessengerV2, s.depositForBurnABI, ethClient, ethClient, ethClient)
+	contract := bind.NewBoundContract(merx.TokenMessengerV2, s.depositForBurnWithHookABI, ethClient, ethClient, ethClient)
 	tx, err := contract.RawTransact(auth, calldata)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "broadcast depositForBurn: %v", err)
+		writeError(w, http.StatusBadGateway, "broadcast depositForBurnWithHook: %v", err)
 		return
 	}
 
@@ -1315,29 +1407,8 @@ func (s *server) handleRefund(w http.ResponseWriter, r *http.Request) {
 		s.invoices.setRefundArcTx(req.InvoiceID, txHash, int(req.ChainID))
 	}
 
-	// Background: poll CCTP attestation, then self-relay receiveMessage on destination.
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-
-		message, attestation, err := s.pollCCTPAttestation(bgCtx, merx.ArcDomain, txHash)
-		if err != nil {
-			log.Printf("[refund-relay] %v", err)
-			return
-		}
-
-		relayTx, err := s.relayCCTP(bgCtx, dstRPC, new(big.Int).SetUint64(req.ChainID), merx.MessageTransmitter, message, attestation)
-		if err != nil {
-			log.Printf("[refund-relay] ERROR: %v", err)
-			return
-		}
-		log.Printf("[refund-relay] receiveMessage: tx=%s (burn tx=%s)", relayTx, txHash)
-
-		// Update invoice with the destination chain relay tx.
-		if req.InvoiceID != "" {
-			s.invoices.setRefundTx(req.InvoiceID, relayTx)
-		}
-	}()
+	// Background: poll CCTP forwarding completion (no self-relay needed).
+	go s.pollRefundCompletion(req.InvoiceID, txHash)
 
 	writeJSON(w, http.StatusCreated, refundResponse{TxHash: txHash})
 }
@@ -1604,26 +1675,56 @@ func (s *server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 	txHash := burnTx.Hash().Hex()
 	log.Printf("[withdraw] depositForBurn broadcast: %s → Arc", txHash)
 
-	// Background: poll CCTP attestation, then self-relay on Arc.
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-
-		message, attestation, err := s.pollCCTPAttestation(bgCtx, 0, txHash) // domain 0 = Eth Sepolia
-		if err != nil {
-			log.Printf("[withdraw] %v", err)
-			return
-		}
-
-		relayTx, err := s.relayCCTP(bgCtx, merx.ArcRPCURL, big.NewInt(merx.ArcChainID), merx.MessageTransmitter, message, attestation)
-		if err != nil {
-			log.Printf("[withdraw] relay on Arc: %v", err)
-			return
-		}
-		log.Printf("[withdraw] settled on Arc: %s", relayTx)
-	}()
+	// Background: poll CCTP forwarding completion (no self-relay needed).
+	go s.pollForwardingCompletion("withdraw", 0, txHash) // domain 0 = Eth Sepolia
 
 	writeJSON(w, http.StatusCreated, map[string]string{"txHash": txHash})
+}
+
+// estimateForwardingFee calls the CCTP fee API and returns the recommended maxFee
+// (protocolFee + forwardFee at "med" level) for a given route and amount.
+func estimateForwardingFee(ctx context.Context, sourceDomain, destDomain uint32, amount *big.Int) (*big.Int, error) {
+	url := fmt.Sprintf("https://iris-api-sandbox.circle.com/v2/burn/USDC/fees/%d/%d?forward=true", sourceDomain, destDomain)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fee API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var fees []struct {
+		FinalityThreshold int `json:"finalityThreshold"`
+		MinimumFee        float64 `json:"minimumFee"` // bps
+		ForwardFee        struct {
+			Med int64 `json:"med"`
+		} `json:"forwardFee"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&fees); err != nil {
+		return nil, fmt.Errorf("parse fee response: %w", err)
+	}
+
+	if len(fees) == 0 {
+		return merx.ForwardingMaxFee, nil // fallback
+	}
+
+	// Use the first entry (fast transfer, finalityThreshold=1000).
+	fee := fees[0]
+
+	// protocolFee = amount * minimumFee(bps) / 10000
+	protocolFee := new(big.Int).Mul(amount, big.NewInt(int64(fee.MinimumFee*100)))
+	protocolFee.Div(protocolFee, big.NewInt(1_000_000))
+
+	// maxFee = protocolFee + forwardFee(med)
+	maxFee := new(big.Int).Add(protocolFee, big.NewInt(fee.ForwardFee.Med))
+
+	// Add 10% margin
+	margin := new(big.Int).Div(maxFee, big.NewInt(10))
+	maxFee.Add(maxFee, margin)
+
+	return maxFee, nil
 }
 
 // getArcUSDCBalance returns the shop wallet's USDC balance on Arc.

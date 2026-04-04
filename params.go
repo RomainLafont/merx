@@ -13,19 +13,17 @@ const DefaultPrivateKey = "4c5c7916326aa54e80c39792003ac7d9464b0fb0558678fc16040
 // Shop wallet address: 0x2A94238046B648EFF3Ec899fbe6C2B7990C52ca3
 
 // ---------------------------------------------------------------------------
-// CCTP domains & chain IDs
+// CCTP V2 contracts (same on all testnets)
 // ---------------------------------------------------------------------------
 
-var ChainIDToDomain = map[uint64]uint32{
-	11155111: 0,  // Ethereum Sepolia
-	84532:    6,  // Base Sepolia
-	1301:     10, // Unichain Sepolia
-}
+var TokenMessengerV2 = common.HexToAddress("0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA")
+var MessageTransmitter = common.HexToAddress("0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275")
 
-// ---------------------------------------------------------------------------
-// USDC addresses (testnet)
-// ---------------------------------------------------------------------------
+// ForwardingHookData is the 32-byte hookData for CCTP Forwarding Service:
+// "cctp-forward" magic (24 bytes) + version 0 (4 bytes) + data length 0 (4 bytes).
+var ForwardingHookData = common.FromHex("636374702d666f72776172640000000000000000000000000000000000000000")
 
+// USDC addresses by CCTP domain (testnet).
 var TestnetUSDC = map[uint32]common.Address{
 	0:  common.HexToAddress("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"), // Ethereum Sepolia
 	6:  common.HexToAddress("0x036CbD53842c5426634e7929541eC2318f3dCF7e"), // Base Sepolia
@@ -34,25 +32,10 @@ var TestnetUSDC = map[uint32]common.Address{
 }
 
 // ---------------------------------------------------------------------------
-// CCTP V2 contracts (same on all testnets)
-// ---------------------------------------------------------------------------
-
-var TokenMessengerV2 = common.HexToAddress("0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA")
-var MessageTransmitter = common.HexToAddress("0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275")
-
-// ---------------------------------------------------------------------------
 // Deployed contracts
 // ---------------------------------------------------------------------------
 
-// ShopPaymaster addresses by EVM chain ID (one per source chain).
-var ShopPaymaster = map[uint64]common.Address{
-	1301:     common.HexToAddress("0xF9b392b25eA1a7671C4badB0E356cc5457AdC47a"), // Unichain Sepolia
-	84532:    common.HexToAddress("0xd94617064C8ca3bfE543A6B0190accB2E41b5Af5"), // Base Sepolia
-	11155111: common.HexToAddress("0xb0262c0Cb99329706126Cae0f152C575067e450a"), // Ethereum Sepolia
-}
-
 // CompoundDepositor on Ethereum Sepolia — CCTP receiveMessage + supply into Compound V3.
-// Will be updated after redeployment with new CCTP-based contract.
 var CompoundDepositor = common.HexToAddress("0x832705f381957C8218d7ae8B20A10d510B5AFB75")
 
 // ---------------------------------------------------------------------------
@@ -75,8 +58,13 @@ const ArcDomain uint32 = 26
 
 const CCTPAttestationURL = "https://iris-api-sandbox.circle.com/v2/messages"
 
-// DefaultMaxFee for CCTP V2 Fast Transfer (USDC, 6 decimals).
-var DefaultMaxFee = big.NewInt(50_000) // $0.05
+// ForwardingMaxFee for CCTP Forwarding Service (USDC, 6 decimals).
+// The Forwarding Service takes the entire maxFee (not just the minimum).
+// $0.50 is the tested working value on testnets.
+var ForwardingMaxFee = big.NewInt(500_000)
+
+// DefaultMaxFee for CCTP V2 Fast Transfer without forwarding (USDC, 6 decimals).
+var DefaultMaxFee = big.NewInt(50_000)
 
 // ---------------------------------------------------------------------------
 // Compound V3 (Ethereum Sepolia)

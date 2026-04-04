@@ -56,6 +56,33 @@ export function listInvoices(): Promise<Invoice[]> {
   return request("/api/invoices");
 }
 
+// Get calldata for depositForBurnWithHook (customer executes this on-chain)
+export function getPayTx(chainId: number, amount: string): Promise<{
+  to: string;
+  data: string;
+  chain_id: number;
+  value: string;
+  maxFee: string;
+  approval: { spender: string; token: string; amount: string };
+}> {
+  return request(`/api/pay-tx?chain_id=${chainId}&amount=${amount}`);
+}
+
+// Report payment tx to backend (customer already executed the tx)
+export function submitPay(req: {
+  txHash: string;
+  chainId: number;
+  amount: string;
+  owner: string;
+  description: string;
+  productId: string;
+}): Promise<{ txHash: string; invoiceId: string }> {
+  return request("/api/pay", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
 // Compound V3 supply (bridge from Arc to Sepolia + supply)
 export function supply(amount: string): Promise<{ txHash: string }> {
   return request("/api/supply", {
@@ -69,40 +96,6 @@ export function withdraw(amount: string): Promise<{ txHash: string }> {
   return request("/api/withdraw", {
     method: "POST",
     body: JSON.stringify({ amount }),
-  });
-}
-
-// Gasless USDC payment (permit + ShopPaymaster)
-export function getPayTx(chainId: number, amount: string): Promise<{
-  chain_id: number;
-  amount: string;
-  deadline: string;
-  permit: {
-    token: string;
-    spender: string;
-    domain: {
-      name: string;
-      version: string;
-      chain_id: number;
-      verifying_contract: string;
-    };
-  };
-}> {
-  return request(`/api/pay-tx?chain_id=${chainId}&amount=${amount}`);
-}
-
-export function submitPay(req: {
-  owner: string;
-  chain_id: number;
-  amount: string;
-  deadline: string;
-  signature: string;
-  description: string;
-  productId: string;
-}): Promise<{ tx_hash: string; chain_id: number; invoice_id: string }> {
-  return request("/api/pay", {
-    method: "POST",
-    body: JSON.stringify(req),
   });
 }
 

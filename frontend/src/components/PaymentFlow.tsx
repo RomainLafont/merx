@@ -9,8 +9,9 @@ import {
   useSignTypedData,
   useSwitchChain,
   useChainId,
+  usePublicClient,
 } from "wagmi";
-import { parseAbi, erc20Abi, type Hex } from "viem";
+import { parseAbi, erc20Abi, encodeFunctionData, type Hex } from "viem";
 
 import type { QuoteResponse } from "@/types/uniswap";
 import type { ChainInfo, TokenEntry } from "@/types/chain";
@@ -24,10 +25,19 @@ const ERC20_ABI = parseAbi([
   "function transfer(address to, uint256 amount) returns (bool)",
 ]);
 
+const DEPOSIT_FOR_BURN_ABI = parseAbi([
+  "function depositForBurnWithHook(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes hookData)",
+]);
+
+const TOKEN_MESSENGER_V2 = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA" as Hex;
+const ARC_DOMAIN = 26;
+const FORWARDING_HOOK = "0x636374702d666f72776172640000000000000000000000000000000000000000" as Hex;
+
+
 const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Hex;
 const MAX_UINT256 = 2n ** 256n - 1n;
 
-type Step = "idle" | "select-token" | "quote" | "approving-permit2" | "signing-permit" | "swapping" | "transferring" | "signing-usdc-permit" | "submitting-pay" | "done" | "error";
+type Step = "idle" | "select-token" | "quote" | "approving-permit2" | "signing-permit" | "swapping" | "transferring" | "approving-cctp" | "burning" | "confirming" | "done" | "error";
 
 interface Props {
   chains: ChainInfo[];
@@ -40,6 +50,7 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
   const { address } = useAccount();
   const currentChainId = useChainId();
   const { switchChain } = useSwitchChain();
+  const publicClient = usePublicClient();
   const [step, setStep] = useState<Step>("idle");
   const [selectedChainId, setSelectedChainId] = useState(0);
   const [selectedSymbol, setSelectedSymbol] = useState("USDC");
@@ -101,6 +112,18 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
 
   const needsPermit2Approval = !isDirectUSDC && (permit2Allowance === undefined || permit2Allowance === 0n);
 
+  // Check CCTP TokenMessenger allowance (for direct USDC payment)
+  const { data: cctpAllowance, refetch: refetchCCTPAllowance } = useReadContract({
+    address: (isDirectUSDC && usdcToken ? usdcToken.address : undefined) as Hex | undefined,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: address ? [address, TOKEN_MESSENGER_V2] : undefined,
+    chainId: selectedChainId || undefined,
+    query: { enabled: !!address && isDirectUSDC && !!usdcToken?.address && selectedChainId > 0 },
+  });
+
+  const needsCCTPApproval = isDirectUSDC && (cctpAllowance === undefined || cctpAllowance < BigInt(amountBaseUnits));
+
   // Permit2 ERC-20 approval TX
   const {
     writeContract: writePermit2Approve,
@@ -112,20 +135,30 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
     hash: permit2ApproveHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
   });
 
-  // Direct USDC transfer (fallback, not used in gasless flow)
+  // CCTP approve tx (wait for 2 confirmations so state is visible for burn simulation)
+  const { writeContract: writeCCTPApprove, data: cctpApproveHash, isPending: cctpApprovePending } = useWriteContract();
+  const { isSuccess: cctpApproveConfirmed, isError: cctpApproveReverted } = useWaitForTransactionReceipt({
+    hash: cctpApproveHash, chainId: selectedChainId || undefined, confirmations: 2, pollingInterval: 4_000,
+  });
+
+  // CCTP burn tx (depositForBurnWithHook)
+  const { sendTransaction: sendBurn, data: burnHash, isPending: burnPending } = useSendTransaction();
+  const { isSuccess: burnConfirmed, isError: burnReverted } = useWaitForTransactionReceipt({
+    hash: burnHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
+  });
+
+  // Direct USDC transfer (legacy, for swap flow)
   const { writeContract, data: transferHash, isPending: transferPending } = useWriteContract();
   const { isSuccess: transferConfirmed, isError: transferReverted } = useWaitForTransactionReceipt({
     hash: transferHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
   });
 
-  // Permit2 signature (for swaps)
-  const { signTypedData, data: permitSignature, isPending: signPending, error: signError } = useSignTypedData();
-
-  // USDC EIP-2612 permit signature (for gasless direct USDC payments)
-  const { signTypedData: signUSDCPermit, data: usdcPermitSig, isPending: usdcPermitPending, error: usdcPermitError } = useSignTypedData();
+  // Pay tx data from backend
   const [payTxData, setPayTxData] = useState<Awaited<ReturnType<typeof getPayTx>> | null>(null);
-  const [submitPayHash, setSubmitPayHash] = useState<string | null>(null);
   const [invoiceId, setInvoiceId] = useState<string | null>(null);
+
+  // Permit2 signature
+  const { signTypedData, data: permitSignature, isPending: signPending, error: signError } = useSignTypedData();
 
   // Swap TX
   const { sendTransaction: sendSwap, data: swapHash, isPending: swapPending } = useSendTransaction();
@@ -146,6 +179,41 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
   useEffect(() => {
     if (transferReverted && step === "transferring") { setError("Transfer reverted on-chain."); setStep("error"); }
   }, [transferReverted, step]);
+  useEffect(() => {
+    if (cctpApproveReverted && step === "approving-cctp") { setError("USDC approval reverted."); setStep("error"); }
+  }, [cctpApproveReverted, step]);
+  useEffect(() => {
+    if (burnReverted && step === "burning") { setError("CCTP burn reverted."); setStep("error"); }
+  }, [burnReverted, step]);
+
+  // After CCTP approve confirmed (2 blocks) → send burn tx
+  useEffect(() => {
+    if (cctpApproveConfirmed && payTxData && step === "approving-cctp") {
+      sendBurnTx(payTxData);
+    }
+  }, [cctpApproveConfirmed, payTxData, step]);
+
+  // After burn confirmed → report to backend
+  useEffect(() => {
+    if (burnConfirmed && burnHash && step === "burning") {
+      setStep("confirming");
+      submitPay({
+        txHash: burnHash,
+        chainId: selectedChainId,
+        amount: amountBaseUnits,
+        owner: address!,
+        description: `Purchase: ${product.title}`,
+        productId: product.id,
+      }).then((res) => {
+        setInvoiceId(res.invoiceId);
+        setStep("done");
+        onPaid();
+      }).catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to confirm payment");
+        setStep("error");
+      });
+    }
+  }, [burnConfirmed, burnHash, step]);
 
   // After Permit2 ERC-20 approval confirmed, proceed to permit signature flow
   useEffect(() => {
@@ -159,49 +227,20 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
     if (permitSignature && step === "signing-permit") { executeSwapWithPermit(permitSignature); }
   }, [permitSignature, step]);
 
-  // After swap confirmed -> auto-trigger gasless USDC payment
+  // After swap confirmed -> trigger CCTP payment
   useEffect(() => {
     if (swapConfirmed && step === "swapping") {
-      doGaslessUSDCPay();
+      doCCTPPayment();
     }
   }, [swapConfirmed, step]);
 
-  // After USDC transfer confirmed (swap flow fallback) -> done
+  // After USDC transfer confirmed (legacy flow) -> done
   useEffect(() => {
     if (transferConfirmed && transferHash) {
       setStep("done");
       onPaid();
     }
   }, [transferConfirmed, transferHash]);
-
-  // USDC permit error
-  useEffect(() => {
-    if (usdcPermitError && step === "signing-usdc-permit") { setError(`Permit rejected: ${usdcPermitError.message}`); setStep("error"); }
-  }, [usdcPermitError, step]);
-
-  // After USDC permit signed -> submit to backend (creates invoice server-side)
-  useEffect(() => {
-    if (usdcPermitSig && payTxData && step === "signing-usdc-permit") {
-      setStep("submitting-pay");
-      submitPay({
-        owner: address!,
-        chain_id: payTxData.chain_id,
-        amount: payTxData.amount,
-        deadline: payTxData.deadline,
-        signature: usdcPermitSig,
-        description: `Purchase: ${product.title}`,
-        productId: product.id,
-      }).then((res) => {
-        setSubmitPayHash(res.tx_hash);
-        setInvoiceId(res.invoice_id);
-        setStep("done");
-        onPaid();
-      }).catch((err) => {
-        setError(err instanceof Error ? err.message : "Payment failed");
-        setStep("error");
-      });
-    }
-  }, [usdcPermitSig, payTxData, step]);
 
   // --- Actions ---
 
@@ -238,53 +277,50 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
     }
   }, [address, selectedToken, isDirectUSDC, selectedChainId]);
 
-  async function doGaslessUSDCPay() {
+  function sendBurnTx(ptx: Awaited<ReturnType<typeof getPayTx>>) {
+    if (!address || !publicClient) return;
+    setStep("burning");
+    const mintRecipient = ("0x" + merchantAddress.slice(2).toLowerCase().padStart(64, "0")) as Hex;
+    const data = encodeFunctionData({
+      abi: DEPOSIT_FOR_BURN_ABI,
+      functionName: "depositForBurnWithHook",
+      args: [
+        BigInt(amountBaseUnits), ARC_DOMAIN, mintRecipient,
+        ptx.approval.token as Hex,
+        "0x0000000000000000000000000000000000000000000000000000000000000000" as Hex,
+        BigInt(ptx.maxFee), 0, FORWARDING_HOOK,
+      ],
+    });
+    publicClient.getTransactionCount({ address }).then((nonce) => {
+      sendBurn(
+        { to: TOKEN_MESSENGER_V2, data, value: 0n, nonce, chainId: selectedChainId },
+        { onError(err) { setError(`Burn TX failed: ${err.message}`); setStep("error"); } },
+      );
+    }).catch((err) => {
+      setError(`Failed: ${err.message}`);
+      setStep("error");
+    });
+  }
+
+  async function doCCTPPayment() {
     if (!usdcToken || !address) return;
     setError("");
-    setStep("signing-usdc-permit");
     try {
-      // 1. Get permit data from backend
       const ptx = await getPayTx(selectedChainId, amountBaseUnits);
       setPayTxData(ptx);
 
-      // 2. Read current nonce for permit
-      // (The nonce is read on-chain via useReadContract, but we need it dynamically)
-      const nonceResp = await fetch(
-        `https://${selectedChainId === 84532 ? "sepolia.base.org" : selectedChainId === 1301 ? "sepolia.unichain.org" : "ethereum-sepolia-rpc.publicnode.com"}`,
-        {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to: usdcToken.address, data: "0x7ecebe00" + address.slice(2).padStart(64, "0") }, "latest"], id: 1 })
-        }
-      );
-      const nonceData = await nonceResp.json();
-      const nonce = parseInt(nonceData.result, 16).toString();
-
-      // 3. Sign EIP-2612 permit
-      signUSDCPermit({
-        domain: {
-          name: ptx.permit.domain.name,
-          version: ptx.permit.domain.version,
-          chainId: BigInt(ptx.permit.domain.chain_id),
-          verifyingContract: ptx.permit.domain.verifying_contract as Hex,
-        },
-        types: {
-          Permit: [
-            { name: "owner", type: "address" },
-            { name: "spender", type: "address" },
-            { name: "value", type: "uint256" },
-            { name: "nonce", type: "uint256" },
-            { name: "deadline", type: "uint256" },
-          ],
-        },
-        primaryType: "Permit",
-        message: {
-          owner: address,
-          spender: ptx.permit.spender as Hex,
-          value: BigInt(ptx.amount),
-          nonce: BigInt(nonce),
-          deadline: BigInt(ptx.deadline),
-        },
-      });
+      if (needsCCTPApproval) {
+        setStep("approving-cctp");
+        writeCCTPApprove({
+          address: ptx.approval.token as Hex,
+          abi: erc20Abi,
+          functionName: "approve",
+          args: [ptx.approval.spender as Hex, BigInt(ptx.approval.amount)],
+        });
+      } else {
+        // Already approved — send burn directly
+        sendBurnTx(ptx);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to prepare payment");
       setStep("error");
@@ -396,12 +432,12 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
           {isDirectUSDC ? (
             <div className="space-y-2">
               <button
-                onClick={doGaslessUSDCPay}
-                disabled={usdcPermitPending}
+                onClick={doCCTPPayment}
+                disabled={cctpApprovePending || burnPending}
                 className="w-full rounded-md bg-[#2775CA] px-4 py-2.5 text-sm font-medium text-white hover:bg-[#2775CA]/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
               >
                 <img src="/usdc.png" alt="" className="h-5 w-5" />
-                {usdcPermitPending ? "Sign permit in wallet..." : `Pay ${product.price} USDC (gasless)`}
+                {cctpApprovePending || burnPending ? "Confirm in wallet..." : `Pay ${product.price} USDC`}
               </button>
               <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
                 <img src="/circle_logo.png" alt="" className="h-3.5 w-3.5" />
@@ -487,14 +523,17 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
       {step === "transferring" && (
         <StatusMessage status="pending">{transferPending ? "Confirm transfer in wallet..." : "Waiting for transfer confirmation..."}</StatusMessage>
       )}
-      {step === "signing-usdc-permit" && (
-        <StatusMessage status="pending">{usdcPermitPending ? "Sign the permit in your wallet (gasless)..." : "Preparing gasless payment..."}</StatusMessage>
+      {step === "approving-cctp" && (
+        <StatusMessage status="pending">{cctpApprovePending ? "Approve USDC in wallet (1/2)..." : "Waiting for approval confirmation..."}</StatusMessage>
       )}
-      {step === "submitting-pay" && (
-        <StatusMessage status="pending">Payment submitted! The shop is broadcasting your transaction...</StatusMessage>
+      {step === "burning" && (
+        <StatusMessage status="pending">{burnPending ? "Confirm bridge transaction in wallet (2/2)..." : "Waiting for bridge confirmation..."}</StatusMessage>
+      )}
+      {step === "confirming" && (
+        <StatusMessage status="pending">Payment confirmed on-chain! Waiting for settlement on Arc...</StatusMessage>
       )}
       {step === "done" && (() => {
-        const txHash = submitPayHash ?? swapHash ?? transferHash;
+        const txHash = burnHash ?? swapHash ?? transferHash;
         const explorerUrl = chain?.explorer && txHash ? `${chain.explorer}/tx/${txHash}` : undefined;
         return (
           <div className="space-y-3">
