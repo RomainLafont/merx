@@ -8,8 +8,7 @@ import { PaymentFlow } from "@/components/PaymentFlow";
 import { ConnectWallet } from "@/components/ConnectWallet";
 import type { ChainInfo } from "@/types/chain";
 import type { Invoice } from "@/types/invoice";
-
-const MERCHANT_ADDRESS = "0x3338A40C3362e6974AA2feCC06a536FF73D6797d";
+import { MERCHANT_ADDRESS } from "@/lib/constants";
 
 export function CheckoutPage() {
   const { productId } = useParams<{ productId: string }>();

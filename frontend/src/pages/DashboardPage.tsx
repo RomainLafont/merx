@@ -1,13 +1,22 @@
 import { useState } from "react";
+import { Navigate } from "react-router-dom";
+import { useAccount } from "wagmi";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getMerchantBalances, listInvoices, sweep } from "@/lib/api";
 import { shortenAddress, formatUSDC } from "@/lib/format";
 import { chainName } from "@/lib/chains";
+import { MERCHANT_ADDRESS } from "@/lib/constants";
 import type { Invoice } from "@/types/invoice";
 
 const ARC_CHAIN_ID = 5042002;
 
 export function DashboardPage() {
+  const { address } = useAccount();
+  const isMerchant = address?.toLowerCase() === MERCHANT_ADDRESS.toLowerCase();
+
+  if (!isMerchant) {
+    return <Navigate to="/" replace />;
+  }
   const queryClient = useQueryClient();
 
   const { data: balances, isLoading: balancesLoading } = useQuery({

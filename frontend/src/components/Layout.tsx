@@ -1,9 +1,13 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { useAccount } from "wagmi";
 import { ConnectWallet } from "./ConnectWallet";
+import { MERCHANT_ADDRESS } from "@/lib/constants";
 
 export function Layout({ children }: { children: ReactNode }) {
   const location = useLocation();
+  const { address } = useAccount();
+  const isMerchant = address?.toLowerCase() === MERCHANT_ADDRESS.toLowerCase();
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -22,14 +26,16 @@ export function Layout({ children }: { children: ReactNode }) {
             >
               Shop
             </Link>
-            <Link
-              to="/dashboard"
-              className={`text-sm transition-colors ${
-                location.pathname === "/dashboard" ? "text-primary" : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              Dashboard
-            </Link>
+            {isMerchant && (
+              <Link
+                to="/dashboard"
+                className={`text-sm transition-colors ${
+                  location.pathname === "/dashboard" ? "text-primary" : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Dashboard
+              </Link>
+            )}
           </nav>
         </div>
         <ConnectWallet />
