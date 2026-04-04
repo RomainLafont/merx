@@ -21,7 +21,10 @@ const ERC20_ABI = parseAbi([
   "function transfer(address to, uint256 amount) returns (bool)",
 ]);
 
-type Step = "select-chain" | "select-token" | "quote" | "signing-permit" | "swapping" | "transferring" | "done" | "error";
+const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Hex;
+const MAX_UINT256 = 2n ** 256n - 1n;
+
+type Step = "select-chain" | "select-token" | "quote" | "approving-permit2" | "signing-permit" | "swapping" | "transferring" | "done" | "error";
 
 interface Props {
   invoice: Invoice | null;
@@ -71,6 +74,29 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
     query: { enabled: !!address && !!selectedToken?.address && selectedChainId > 0 },
   });
 
+  // Check Permit2 allowance for selected token (needed before swap)
+  const { data: permit2Allowance } = useReadContract({
+    address: (!isDirectUSDC ? selectedToken?.address ?? undefined : undefined) as Hex | undefined,
+    abi: erc20Abi,
+    functionName: "allowance",
+    args: address ? [address, PERMIT2] : undefined,
+    chainId: selectedChainId || undefined,
+    query: { enabled: !!address && !isDirectUSDC && !!selectedToken?.address && selectedChainId > 0 },
+  });
+
+  const needsPermit2Approval = !isDirectUSDC && (permit2Allowance === undefined || permit2Allowance === 0n);
+
+  // Permit2 ERC-20 approval TX
+  const {
+    writeContract: writePermit2Approve,
+    data: permit2ApproveHash,
+    isPending: permit2ApprovePending,
+  } = useWriteContract();
+
+  const { isSuccess: permit2ApproveConfirmed, isError: permit2ApproveReverted } = useWaitForTransactionReceipt({
+    hash: permit2ApproveHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
+  });
+
   // Direct USDC transfer
   const { writeContract, data: transferHash, isPending: transferPending } = useWriteContract();
   const { isSuccess: transferConfirmed, isError: transferReverted } = useWaitForTransactionReceipt({
@@ -88,6 +114,9 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
 
   // Error detection
   useEffect(() => {
+    if (permit2ApproveReverted && step === "approving-permit2") { setError("Permit2 approval reverted on-chain."); setStep("error"); }
+  }, [permit2ApproveReverted, step]);
+  useEffect(() => {
     if (signError && step === "signing-permit") { setError(`Permit signature rejected: ${signError.message}`); setStep("error"); }
   }, [signError, step]);
   useEffect(() => {
@@ -97,19 +126,26 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
     if (transferReverted && step === "transferring") { setError("Transfer reverted on-chain."); setStep("error"); }
   }, [transferReverted, step]);
 
+  // After Permit2 ERC-20 approval confirmed, proceed to permit signature flow
+  useEffect(() => {
+    if (permit2ApproveConfirmed && step === "approving-permit2") {
+      proceedToPermitSign();
+    }
+  }, [permit2ApproveConfirmed, step]);
+
   // After permit signed �� swap
   useEffect(() => {
     if (permitSignature && step === "signing-permit") { executeSwapWithPermit(permitSignature); }
   }, [permitSignature, step]);
 
-  // After swap confirmed → done
+  // After swap confirmed → auto-trigger USDC transfer to merchant
   useEffect(() => {
-    if (swapConfirmed && swapHash && step === "swapping") {
-      payInvoice(invoice!.id, swapHash).then(() => { setStep("done"); onPaid(); });
+    if (swapConfirmed && step === "swapping") {
+      doTransfer();
     }
-  }, [swapConfirmed, swapHash, step]);
+  }, [swapConfirmed, step]);
 
-  // After USDC transfer confirmed → done
+  // After USDC transfer confirmed → mark paid
   useEffect(() => {
     if (transferConfirmed && transferHash && invoice) {
       payInvoice(invoice.id, transferHash).then(() => { setStep("done"); onPaid(); });
@@ -163,10 +199,28 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
 
   async function handlePayWithSwap() {
     if (!address || !selectedToken || !invoice) { setError("Missing data."); setStep("error"); return; }
+
+    // Step 0: if token not approved to Permit2, do ERC-20 approve first
+    if (needsPermit2Approval) {
+      setStep("approving-permit2");
+      writePermit2Approve({
+        address: selectedToken.address as Hex,
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [PERMIT2, MAX_UINT256],
+      });
+      return;
+    }
+
+    // Already approved to Permit2, go to permit signature
+    await proceedToPermitSign();
+  }
+
+  async function proceedToPermitSign() {
+    if (!address || !selectedToken || !invoice) { setError("Missing data."); setStep("error"); return; }
     setStep("signing-permit");
     try {
       const freshResp = await getQuote({ tokenIn: selectedToken.address, tokenInChainId: selectedChainId, amount: invoice.amount, swapper: address });
-      freshResp.quote.output.recipient = invoice.merchantAddress;
       setQuote(freshResp);
       if (!freshResp.permitData) { await executeSwapWithPermit(undefined, freshResp); return; }
       pendingQuoteRef = freshResp;
@@ -325,7 +379,7 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
             )}
           </div>
 
-          <p className="text-xs text-muted-foreground text-center">One signature + one transaction. USDC goes directly to the merchant.</p>
+          <p className="text-xs text-muted-foreground text-center">One signature + swap + transfer to merchant.</p>
 
           <div className="flex gap-2">
             <button onClick={() => { setStep("select-token"); setQuote(null); }} className="flex-1 rounded-md border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors">Back</button>
@@ -335,6 +389,15 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
       )}
 
       {/* Progress states */}
+      {step === "approving-permit2" && (
+        <StatusMessage status="pending">
+          {permit2ApprovePending
+            ? "Approve token for Permit2 in your wallet..."
+            : permit2ApproveHash
+              ? "Waiting for approval confirmation..."
+              : "Preparing approval..."}
+        </StatusMessage>
+      )}
       {step === "signing-permit" && (
         <StatusMessage status="pending">{signPending ? "Sign the permit in your wallet..." : "Preparing swap..."}</StatusMessage>
       )}
