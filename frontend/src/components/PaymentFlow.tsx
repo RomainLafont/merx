@@ -21,8 +21,6 @@ import { formatUSDC } from "@/lib/format";
 import { ChainSelector } from "./ChainSelector";
 import { TokenSelector } from "./TokenSelector";
 
-const TOKEN_MESSENGER_V2 = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA" as Hex;
-
 const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Hex;
 const MAX_UINT256 = 2n ** 256n - 1n;
 
@@ -98,18 +96,6 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
 
   const needsPermit2Approval = !isDirectUSDC && (permit2Allowance === undefined || permit2Allowance === 0n);
 
-  // Check CCTP TokenMessenger allowance (needed for both direct USDC and post-swap bridge)
-  const { data: cctpAllowance } = useReadContract({
-    address: (usdcToken ? usdcToken.address : undefined) as Hex | undefined,
-    abi: erc20Abi,
-    functionName: "allowance",
-    args: address ? [address, TOKEN_MESSENGER_V2] : undefined,
-    chainId: selectedChainId || undefined,
-    query: { enabled: !!address && !!usdcToken?.address && selectedChainId > 0 },
-  });
-
-  const needsCCTPApproval = cctpAllowance === undefined || cctpAllowance < BigInt(amountBaseUnits);
-
   // Permit2 ERC-20 approval TX
   const {
     writeContract: writePermit2Approve,
@@ -118,25 +104,25 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
   } = useWriteContract();
 
   const { isSuccess: permit2ApproveConfirmed, isError: permit2ApproveReverted } = useWaitForTransactionReceipt({
-    hash: permit2ApproveHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
+    hash: permit2ApproveHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 2_000,
   });
 
-  // CCTP approve tx (wait for 2 confirmations so state is visible for burn simulation)
+  // CCTP approve tx
   const { writeContract: writeCCTPApprove, data: cctpApproveHash, isPending: cctpApprovePending } = useWriteContract();
   const { isSuccess: cctpApproveConfirmed, isError: cctpApproveReverted } = useWaitForTransactionReceipt({
-    hash: cctpApproveHash, chainId: selectedChainId || undefined, confirmations: 2, pollingInterval: 4_000,
+    hash: cctpApproveHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 2_000,
   });
 
   // CCTP burn tx (depositForBurnWithHook)
   const { sendTransaction: sendBurn, data: burnHash, isPending: burnPending } = useSendTransaction();
   const { isSuccess: burnConfirmed, isError: burnReverted } = useWaitForTransactionReceipt({
-    hash: burnHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
+    hash: burnHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 2_000,
   });
 
   // Direct USDC transfer (legacy, for swap flow)
   const { data: transferHash, isPending: transferPending } = useWriteContract();
   const { isSuccess: transferConfirmed, isError: transferReverted } = useWaitForTransactionReceipt({
-    hash: transferHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
+    hash: transferHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 2_000,
   });
 
   // Pay tx data from backend
@@ -149,7 +135,7 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
   // Swap TX
   const { sendTransaction: sendSwap, data: swapHash, isPending: swapPending } = useSendTransaction();
   const { isSuccess: swapConfirmed, isError: swapReverted } = useWaitForTransactionReceipt({
-    hash: swapHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
+    hash: swapHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 2_000,
   });
 
   // Error detection
@@ -172,10 +158,12 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
     if (burnReverted && step === "burning") { setError("CCTP burn reverted."); setStep("error"); }
   }, [burnReverted, step]);
 
-  // After CCTP approve confirmed (2 blocks) → send burn tx
+  // After CCTP approve confirmed → wait for state propagation then send burn tx
   useEffect(() => {
     if (cctpApproveConfirmed && payTxData && step === "approving-cctp") {
-      sendBurnTx(payTxData);
+      // Wait 3s for RPC state propagation (MetaMask simulates against latest state).
+      const timer = setTimeout(() => sendBurnTx(payTxData), 3000);
+      return () => clearTimeout(timer);
     }
   }, [cctpApproveConfirmed, payTxData, step]);
 
@@ -266,13 +254,13 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
   function sendBurnTx(ptx: Awaited<ReturnType<typeof getPayTx>>) {
     if (!address || !publicClient) return;
     setStep("burning");
-    publicClient.getTransactionCount({ address }).then((nonce) => {
+    publicClient.getTransactionCount({ address, blockTag: "pending" }).then((nonce) => {
       sendBurn(
         {
           to: ptx.to as Hex,
           data: ptx.data as Hex,
           value: BigInt(ptx.value),
-          gas: 15_000_000n, // skip RPC gas estimation
+          gas: 400_000n, // enough for depositForBurnWithHook (~200k actual)
           nonce,
           chainId: ptx.chain_id,
         },
@@ -291,18 +279,14 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
       const ptx = await getPayTx(selectedChainId, amountBaseUnits);
       setPayTxData(ptx);
 
-      if (needsCCTPApproval) {
-        setStep("approving-cctp");
-        writeCCTPApprove({
-          address: ptx.approval.token as Hex,
-          abi: erc20Abi,
-          functionName: "approve",
-          args: [ptx.approval.spender as Hex, BigInt(ptx.approval.amount)],
-        });
-      } else {
-        // Already approved — send burn directly
-        sendBurnTx(ptx);
-      }
+      // Always approve before burn (allowance is consumed each time).
+      setStep("approving-cctp");
+      writeCCTPApprove({
+        address: ptx.approval.token as Hex,
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [ptx.approval.spender as Hex, BigInt(ptx.approval.amount)],
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to prepare payment");
       setStep("error");
@@ -329,14 +313,16 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
   }
 
   async function proceedToPermitSign() {
-    if (!address || !selectedToken || !address) { setError("Missing data."); setStep("error"); return; }
+    if (!address || !selectedToken) { setError("Missing data."); setStep("error"); return; }
     setStep("signing-permit");
     try {
-      const freshResp = await getQuote({ tokenIn: selectedToken.address, tokenInChainId: selectedChainId, amount: amountBaseUnits, swapper: address });
-      setQuote(freshResp);
-      if (!freshResp.permitData) { await executeSwapWithPermit(undefined, freshResp); return; }
-      pendingQuoteRef = freshResp;
-      const pd = freshResp.permitData;
+      // Fetch a FRESH quote — the permit signature is tied to this exact quote.
+      // The same quote MUST be used for buildSwap.
+      const freshQuote = await getQuote({ tokenIn: selectedToken.address, tokenInChainId: selectedChainId, amount: amountBaseUnits, swapper: address });
+      setQuote(freshQuote);
+      if (!freshQuote.permitData) { pendingQuoteRef = freshQuote; await executeSwapWithPermit(undefined); return; }
+      pendingQuoteRef = freshQuote;
+      const pd = freshQuote.permitData;
       signTypedData(
         { domain: { name: pd.domain.name as string, chainId: Number(pd.domain.chainId), verifyingContract: pd.domain.verifyingContract as Hex }, types: pd.types as Record<string, Array<{ name: string; type: string }>>, primaryType: "PermitSingle", message: pd.values as Record<string, unknown> },
         { onError(err) { setError(`Permit failed: ${err.message}`); setStep("error"); } },
@@ -344,12 +330,17 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
     } catch (err) { setError(err instanceof Error ? err.message : "Failed to prepare swap"); setStep("error"); }
   }
 
-  async function executeSwapWithPermit(signature?: string, quoteOverride?: QuoteResponse) {
-    const activeQuote = quoteOverride ?? pendingQuoteRef;
+  async function executeSwapWithPermit(signature?: string) {
+    // Use the SAME quote that was signed — signature is tied to the permit data.
+    const activeQuote = pendingQuoteRef ?? quote;
     if (!activeQuote) { setError("No quote available."); setStep("error"); return; }
     setStep("swapping");
     try {
-      const swapResp = await buildSwap({ quote: activeQuote.quote, ...(signature ? { signature } : {}), ...(activeQuote.permitData ? { permitData: activeQuote.permitData } : {}) });
+      const swapResp = await buildSwap({
+        quote: activeQuote.quote,
+        ...(signature ? { signature } : {}),
+        ...(activeQuote.permitData ? { permitData: activeQuote.permitData } : {}),
+      });
       const tx = swapResp.swap;
       const apiGas = tx.gasLimit ? BigInt(tx.gasLimit) : 0n;
       const safeGas = apiGas < 300_000n ? 400_000n : apiGas;

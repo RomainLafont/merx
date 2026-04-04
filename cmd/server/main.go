@@ -511,11 +511,15 @@ func (s *server) handleMerchantBalances(w http.ResponseWriter, r *http.Request) 
 		usdc    common.Address
 	}
 
-	// Build query list from registry + Arc.
+	// Build query list — only chains where the shop operates.
 	var queries []rpcQuery
 	if loadedRegistry != nil {
 		for _, rc := range loadedRegistry.Chains {
 			if rc.RPC == "" {
+				continue
+			}
+			// Only show chains where the shop operates (Ethereum Sepolia for Compound).
+			if rc.ChainID != 11155111 {
 				continue
 			}
 			for _, t := range rc.Tokens {
