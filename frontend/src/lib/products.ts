@@ -48,7 +48,7 @@ export const products: Product[] = [
     id: "nft-art",
     title: "NFTs & Digital Art",
     author: "Pak & Friends",
-    price: "9.99",
+    price: "0.99",
     cover: "\u{1F3A8}",
     description:
       "Explore the intersection of art and blockchain: minting, marketplaces, and the creator economy.",
