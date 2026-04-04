@@ -62,8 +62,6 @@ func loadUniswapConfig(path string) (*uniswapConfig, error) {
 	return &cfg, nil
 }
 
-// Merchant wallet key. Address: 0x3338A40C3362e6974AA2feCC06a536FF73D6797d
-const defaultPrivateKey = "63de9a8de555c9e160c577087e4d43865f6018aeb5bf919268ed5de5d525a126"
 
 const depositForBurnABIJSON = `[{"type":"function","name":"depositForBurn","inputs":[{"name":"amount","type":"uint256"},{"name":"destinationDomain","type":"uint32"},{"name":"mintRecipient","type":"bytes32"},{"name":"burnToken","type":"address"},{"name":"destinationCaller","type":"bytes32"},{"name":"maxFee","type":"uint256"},{"name":"minFinalityThreshold","type":"uint32"}],"outputs":[]}]`
 
@@ -253,7 +251,7 @@ func main() {
 		keyHex = os.Getenv("PRIVATE_KEY")
 	}
 	if keyHex == "" {
-		keyHex = defaultPrivateKey
+		keyHex = merx.DefaultPrivateKey
 	}
 
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(keyHex, "0x"))
@@ -447,10 +445,25 @@ func (s *server) handleMerchantBalances(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Query Compound V3 balance on Ethereum Sepolia.
+	compoundBalance := "0"
+	if merx.CompoundComet != (common.Address{}) {
+		sepoliaRPC := merx.RPCURLs[11155111]
+		if sepoliaClient, err := ethclient.DialContext(ctx, sepoliaRPC); err == nil {
+			defer sepoliaClient.Close()
+			cometContract := bind.NewBoundContract(merx.CompoundComet, balABI, sepoliaClient, sepoliaClient, sepoliaClient)
+			var cometOut []interface{}
+			if err := cometContract.Call(&bind.CallOpts{Context: ctx}, &cometOut, "balanceOf", s.signer); err == nil {
+				compoundBalance = cometOut[0].(*big.Int).String()
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"merchant": s.signer.Hex(),
 		"total":    total.String(),
 		"balances": balances,
+		"compound": compoundBalance,
 	})
 }
 

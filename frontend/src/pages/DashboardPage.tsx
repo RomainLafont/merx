@@ -46,21 +46,28 @@ export function DashboardPage() {
   const [sweeping, setSweeping] = useState(false);
   const [sweepResult, setSweepResult] = useState<string | null>(null);
   const [sweepError, setSweepError] = useState("");
+  const [sweepAmount, setSweepAmount] = useState("");
 
   const totalHuman = balances ? formatUSDC(balances.total) : "0";
   const arcBalance = balances?.balances.find((b) => b.chainId === ARC_CHAIN_ID);
   const arcAmount = arcBalance?.balance ?? "0";
   const hasArcFunds = arcAmount !== "0";
 
+  // Convert human input (e.g. "1.5") to base units (e.g. "1500000").
+  const sweepBaseUnits = sweepAmount
+    ? String(Math.floor(parseFloat(sweepAmount) * 1_000_000))
+    : "0";
+  const sweepValid = parseFloat(sweepAmount) > 0 && BigInt(sweepBaseUnits) <= BigInt(arcAmount);
+
   async function handleSweep() {
-    if (!hasArcFunds) return;
+    if (!sweepValid) return;
     setSweeping(true);
     setSweepError("");
     setSweepResult(null);
     try {
-      const res = await sweep(arcAmount);
+      const res = await sweep(sweepBaseUnits);
       setSweepResult(res.txHash);
-      // Refresh balances after a short delay
+      setSweepAmount("");
       setTimeout(() => queryClient.invalidateQueries({ queryKey: ["merchant-balances"] }), 3000);
     } catch (err) {
       setSweepError(err instanceof Error ? err.message : "Sweep failed");
@@ -120,6 +127,22 @@ export function DashboardPage() {
         )}
       </div>
 
+      {/* Compound V3 balance */}
+      <div className="rounded-lg border border-border bg-card p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm text-muted-foreground mb-1">Compound V3 Vault (Ethereum Sepolia)</p>
+            <p className="text-2xl font-bold text-primary">
+              {balancesLoading ? "..." : `${formatUSDC(balances?.compound ?? "0")} USDC`}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-muted-foreground">Earning yield</p>
+            <p className="text-xs text-success font-medium">cUSDCv3</p>
+          </div>
+        </div>
+      </div>
+
       {/* Sweep to Compound */}
       <div className="rounded-lg border border-border bg-card p-6 space-y-4">
         <div>
@@ -129,20 +152,68 @@ export function DashboardPage() {
           </p>
         </div>
 
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm text-muted-foreground">Available on Arc</p>
-            <p className="text-xl font-bold">
-              {balancesLoading ? "..." : `${formatUSDC(arcAmount)} USDC`}
-            </p>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-muted-foreground">Available on Arc</p>
+              <p className="text-xl font-bold">
+                {balancesLoading ? "..." : `${formatUSDC(arcAmount)} USDC`}
+              </p>
+            </div>
           </div>
-          <button
-            onClick={handleSweep}
-            disabled={sweeping || !hasArcFunds || balancesLoading}
-            className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {sweeping ? "Sweeping..." : "Sweep to Compound"}
-          </button>
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">Sweep amount</span>
+              <span className="font-mono font-bold">
+                {sweepAmount ? `${sweepAmount} USDC` : "0 USDC"}
+              </span>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max={arcAmount}
+              step="10000"
+              value={sweepAmount ? String(Math.floor(parseFloat(sweepAmount) * 1_000_000)) : "0"}
+              onChange={(e) => {
+                const val = parseInt(e.target.value);
+                setSweepAmount(val > 0 ? (val / 1_000_000).toFixed(2) : "");
+              }}
+              disabled={sweeping || !hasArcFunds}
+              className="w-full h-2 rounded-full appearance-none cursor-pointer bg-border accent-primary disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <div className="flex items-center gap-3">
+              <div className="relative flex-1">
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="0.00"
+                  value={sweepAmount}
+                  onChange={(e) => setSweepAmount(e.target.value)}
+                  disabled={sweeping || !hasArcFunds}
+                  className="w-full rounded-md border border-border bg-background px-3 py-2.5 text-sm font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                  USDC
+                </span>
+              </div>
+              <button
+                onClick={() => setSweepAmount(formatUSDC(arcAmount))}
+                disabled={sweeping || !hasArcFunds}
+                className="rounded-md border border-border px-3 py-2.5 text-xs font-medium text-muted-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                Max
+              </button>
+              <button
+                onClick={handleSweep}
+                disabled={sweeping || !sweepValid || balancesLoading}
+                className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {sweeping ? "Sweeping..." : "Sweep"}
+              </button>
+            </div>
+          </div>
         </div>
 
         {sweepResult && (

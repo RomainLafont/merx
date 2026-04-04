@@ -56,7 +56,10 @@ export function CheckoutPage() {
 
   return (
     <div className="max-w-lg mx-auto space-y-6">
-      <Link to="/" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+      <Link
+        to="/"
+        className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+      >
         &larr; Back to shop
       </Link>
 
@@ -67,7 +70,9 @@ export function CheckoutPage() {
           <h1 className="text-xl font-bold">{product.title}</h1>
           <p className="text-sm text-muted-foreground">{product.author}</p>
         </div>
-        <span className="text-2xl font-bold text-primary">{product.price} USDC</span>
+        <span className="text-2xl font-bold text-primary">
+          {product.price} USDC
+        </span>
       </div>
 
       {/* Payment section */}
@@ -76,7 +81,9 @@ export function CheckoutPage() {
 
         {!isConnected ? (
           <div className="text-center space-y-3 py-4">
-            <p className="text-muted-foreground text-sm">Connect your wallet to proceed</p>
+            <p className="text-muted-foreground text-sm">
+              Connect your wallet to proceed
+            </p>
             <ConnectWallet />
           </div>
         ) : (

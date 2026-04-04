@@ -46,6 +46,7 @@ export function getMerchantBalances(): Promise<{
   merchant: string;
   total: string;
   balances: Array<{ chain: string; chainId: number; balance: string }>;
+  compound: string;
 }> {
   return request("/api/merchant/balances");
 }
