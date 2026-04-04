@@ -5,10 +5,16 @@ export interface Invoice {
   amountHuman: string; // e.g. "100.00"
   chainId: number;
   description: string;
-  status: "pending" | "paid";
+  payerAddress?: string;
+  status: "pending" | "paid" | "bridging" | "attesting" | "settled";
   txHash?: string;
+  arcTxHash?: string;
+  refundArcTxHash?: string;
+  refundTxHash?: string;
+  refundChainId?: number;
   createdAt: string;
   paidAt?: string;
+  settledAt?: string;
 }
 
 export interface CreateInvoiceRequest {

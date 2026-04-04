@@ -50,3 +50,19 @@ export function chainName(chainId: number): string {
   const chain = supportedChains.find((c) => c.id === chainId);
   return chain?.name ?? `Chain ${chainId}`;
 }
+
+const explorerURLs: Record<number, string> = {
+  11155111: "https://sepolia.etherscan.io",
+  84532:    "https://sepolia.basescan.org",
+  1301:     "https://sepolia.uniscan.xyz",
+  5042002:  "https://testnet.arcscan.app",
+};
+
+export function txExplorerURL(chainId: number, txHash: string): string | null {
+  const base = explorerURLs[chainId];
+  return base ? `${base}/tx/${txHash}` : null;
+}
+
+export function arcTxURL(txHash: string): string {
+  return `https://testnet.arcscan.app/tx/${txHash}`;
+}

@@ -3,11 +3,11 @@ import { useParams, Link } from "react-router-dom";
 import { useAccount } from "wagmi";
 import { useQuery } from "@tanstack/react-query";
 import { getProduct } from "@/lib/products";
-import { getChains, createInvoice } from "@/lib/api";
+import { getChains } from "@/lib/api";
 import { PaymentFlow } from "@/components/PaymentFlow";
 import { ConnectWallet } from "@/components/ConnectWallet";
 import type { ChainInfo } from "@/types/chain";
-import type { Invoice } from "@/types/invoice";
+
 import { MERCHANT_ADDRESS } from "@/lib/constants";
 
 export function CheckoutPage() {
@@ -15,8 +15,7 @@ export function CheckoutPage() {
   const { address, isConnected } = useAccount();
   const product = getProduct(productId ?? "");
 
-  const [invoice, setInvoice] = useState<Invoice | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [paid, setPaid] = useState(false);
   const [error, setError] = useState("");
 
   const { data: chains } = useQuery<ChainInfo[]>({
@@ -33,25 +32,6 @@ export function CheckoutPage() {
         </Link>
       </div>
     );
-  }
-
-  async function startPayment(chainId: number) {
-    if (!address) return;
-    setCreating(true);
-    setError("");
-    try {
-      const inv = await createInvoice({
-        merchantAddress: MERCHANT_ADDRESS,
-        amount: product!.price,
-        chainId,
-        description: `Purchase: ${product!.title}`,
-      });
-      setInvoice(inv);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start checkout");
-    } finally {
-      setCreating(false);
-    }
   }
 
   return (
@@ -88,13 +68,10 @@ export function CheckoutPage() {
           </div>
         ) : (
           <PaymentFlow
-            invoice={invoice}
             chains={chains ?? []}
             product={product}
-            creating={creating}
-            onSelectChain={startPayment}
-            onReset={() => setInvoice(null)}
-            onPaid={() => {}}
+            merchantAddress={MERCHANT_ADDRESS}
+            onPaid={() => setPaid(true)}
           />
         )}
 

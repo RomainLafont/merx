@@ -47,6 +47,7 @@ export function getMerchantBalances(): Promise<{
   total: string;
   balances: Array<{ chain: string; chainId: number; balance: string }>;
   compound: string;
+  compoundAPY: string;
 }> {
   return request("/api/merchant/balances");
 }
@@ -60,6 +61,52 @@ export function sweep(amount: string): Promise<{ txHash: string }> {
   return request("/api/sweep", {
     method: "POST",
     body: JSON.stringify({ amount }),
+  });
+}
+
+// Gasless USDC payment (permit + ShopPaymaster)
+export function getPayTx(chainId: number, amount: string): Promise<{
+  chain_id: number;
+  amount: string;
+  deadline: string;
+  permit: {
+    token: string;
+    spender: string;
+    domain: {
+      name: string;
+      version: string;
+      chain_id: number;
+      verifying_contract: string;
+    };
+  };
+}> {
+  return request(`/api/pay-tx?chain_id=${chainId}&amount=${amount}`);
+}
+
+export function submitPay(req: {
+  owner: string;
+  chain_id: number;
+  amount: string;
+  deadline: string;
+  signature: string;
+  description: string;
+}): Promise<{ tx_hash: string; chain_id: number; invoice_id: string }> {
+  return request("/api/pay", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+// Refund
+export function refund(req: {
+  invoiceId: string;
+  to: string;
+  chainId: number;
+  amount: string;
+}): Promise<{ txHash: string }> {
+  return request("/api/refund", {
+    method: "POST",
+    body: JSON.stringify(req),
   });
 }
 

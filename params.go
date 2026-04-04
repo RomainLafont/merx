@@ -46,7 +46,9 @@ var MessageTransmitter = common.HexToAddress("0xE737e5cEBEEBa77EFE34D4aa09075659
 
 // ShopPaymaster addresses by EVM chain ID (one per source chain).
 var ShopPaymaster = map[uint64]common.Address{
-	1301: common.HexToAddress("0xF9b392b25eA1a7671C4badB0E356cc5457AdC47a"), // Unichain Sepolia
+	1301:     common.HexToAddress("0xF9b392b25eA1a7671C4badB0E356cc5457AdC47a"), // Unichain Sepolia
+	84532:    common.HexToAddress("0xd94617064C8ca3bfE543A6B0190accB2E41b5Af5"), // Base Sepolia
+	11155111: common.HexToAddress("0xb0262c0Cb99329706126Cae0f152C575067e450a"), // Ethereum Sepolia
 }
 
 // CompoundDepositor on Ethereum Sepolia — CCTP receiveMessage + supply into Compound V3.

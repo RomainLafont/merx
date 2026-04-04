@@ -10,11 +10,11 @@ import {
   useChainId,
 } from "wagmi";
 import { parseAbi, erc20Abi, type Hex } from "viem";
-import type { Invoice } from "@/types/invoice";
+
 import type { QuoteResponse } from "@/types/uniswap";
 import type { ChainInfo, TokenEntry } from "@/types/chain";
 import type { Product } from "@/lib/products";
-import { getQuote, buildSwap, payInvoice } from "@/lib/api";
+import { getQuote, buildSwap, getPayTx, submitPay } from "@/lib/api";
 import { formatUSDC } from "@/lib/format";
 import { ChainSelector } from "./ChainSelector";
 
@@ -25,25 +25,25 @@ const ERC20_ABI = parseAbi([
 const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Hex;
 const MAX_UINT256 = 2n ** 256n - 1n;
 
-type Step = "idle" | "select-token" | "quote" | "approving-permit2" | "signing-permit" | "swapping" | "transferring" | "done" | "error";
+type Step = "idle" | "select-token" | "quote" | "approving-permit2" | "signing-permit" | "swapping" | "transferring" | "signing-usdc-permit" | "submitting-pay" | "done" | "error";
 
 interface Props {
-  invoice: Invoice | null;
   chains: ChainInfo[];
   product: Product;
-  creating: boolean;
-  onSelectChain: (chainId: number) => void;
-  onReset: () => void;
+  merchantAddress: string;
   onPaid: () => void;
 }
 
-export function PaymentFlow({ invoice, chains, product, creating, onSelectChain, onReset, onPaid }: Props) {
+export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props) {
   const { address } = useAccount();
   const currentChainId = useChainId();
   const { switchChain } = useSwitchChain();
   const [step, setStep] = useState<Step>("idle");
   const [selectedChainId, setSelectedChainId] = useState(0);
   const [selectedSymbol, setSelectedSymbol] = useState("USDC");
+
+  // Amount in base units (6 decimals) from human-readable price
+  const amountBaseUnits = String(Math.round(parseFloat(product.price) * 1_000_000));
   const [quote, setQuote] = useState<QuoteResponse | null>(null);
   const [error, setError] = useState("");
   const [loadingQuote, setLoadingQuote] = useState(false);
@@ -56,14 +56,6 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
       : chain?.tokens.find((t) => t.symbol === selectedSymbol);
   const usdcToken = chain?.tokens.find((t) => t.symbol === "USDC");
   const isDirectUSDC = selectedSymbol === "USDC";
-
-  // When invoice is created (chain selected), sync chainId and move to token selection
-  useEffect(() => {
-    if (invoice && step === "idle") {
-      setSelectedChainId(invoice.chainId);
-      setStep("select-token");
-    }
-  }, [invoice, step]);
 
   // Read balance of selected token
   const { data: tokenBalance, isLoading: balanceLoading, error: balanceError } = useReadContract({
@@ -98,14 +90,19 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
     hash: permit2ApproveHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
   });
 
-  // Direct USDC transfer
+  // Direct USDC transfer (fallback, not used in gasless flow)
   const { writeContract, data: transferHash, isPending: transferPending } = useWriteContract();
   const { isSuccess: transferConfirmed, isError: transferReverted } = useWaitForTransactionReceipt({
     hash: transferHash, chainId: selectedChainId || undefined, confirmations: 1, pollingInterval: 4_000,
   });
 
-  // Permit2 signature
+  // Permit2 signature (for swaps)
   const { signTypedData, data: permitSignature, isPending: signPending, error: signError } = useSignTypedData();
+
+  // USDC EIP-2612 permit signature (for gasless direct USDC payments)
+  const { signTypedData: signUSDCPermit, data: usdcPermitSig, isPending: usdcPermitPending, error: usdcPermitError } = useSignTypedData();
+  const [payTxData, setPayTxData] = useState<Awaited<ReturnType<typeof getPayTx>> | null>(null);
+  const [submitPayHash, setSubmitPayHash] = useState<string | null>(null);
 
   // Swap TX
   const { sendTransaction: sendSwap, data: swapHash, isPending: swapPending } = useSendTransaction();
@@ -134,24 +131,52 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
     }
   }, [permit2ApproveConfirmed, step]);
 
-  // After permit signed �� swap
+  // After permit signed -> swap
   useEffect(() => {
     if (permitSignature && step === "signing-permit") { executeSwapWithPermit(permitSignature); }
   }, [permitSignature, step]);
 
-  // After swap confirmed → auto-trigger USDC transfer to merchant
+  // After swap confirmed -> auto-trigger gasless USDC payment
   useEffect(() => {
     if (swapConfirmed && step === "swapping") {
-      doTransfer();
+      doGaslessUSDCPay();
     }
   }, [swapConfirmed, step]);
 
-  // After USDC transfer confirmed → mark paid
+  // After USDC transfer confirmed (swap flow fallback) -> done
   useEffect(() => {
-    if (transferConfirmed && transferHash && invoice) {
-      payInvoice(invoice.id, transferHash).then(() => { setStep("done"); onPaid(); });
+    if (transferConfirmed && transferHash) {
+      setStep("done");
+      onPaid();
     }
-  }, [transferConfirmed, transferHash, invoice]);
+  }, [transferConfirmed, transferHash]);
+
+  // USDC permit error
+  useEffect(() => {
+    if (usdcPermitError && step === "signing-usdc-permit") { setError(`Permit rejected: ${usdcPermitError.message}`); setStep("error"); }
+  }, [usdcPermitError, step]);
+
+  // After USDC permit signed -> submit to backend (creates invoice server-side)
+  useEffect(() => {
+    if (usdcPermitSig && payTxData && step === "signing-usdc-permit") {
+      setStep("submitting-pay");
+      submitPay({
+        owner: address!,
+        chain_id: payTxData.chain_id,
+        amount: payTxData.amount,
+        deadline: payTxData.deadline,
+        signature: usdcPermitSig,
+        description: `Purchase: ${product.title}`,
+      }).then((res) => {
+        setSubmitPayHash(res.tx_hash);
+        setStep("done");
+        onPaid();
+      }).catch((err) => {
+        setError(err instanceof Error ? err.message : "Payment failed");
+        setStep("error");
+      });
+    }
+  }, [usdcPermitSig, payTxData, step]);
 
   // --- Actions ---
 
@@ -160,28 +185,25 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
     setSelectedSymbol("USDC");
     setQuote(null);
     setError("");
-    // Auto-switch wallet network
+    setStep("select-token");
     if (currentChainId !== chainId) {
       switchChain({ chainId });
     }
-    // Create invoice for this chain
-    onSelectChain(chainId);
   }
 
   function handleChangeChain(chainId: number) {
     setSelectedSymbol("USDC");
     setQuote(null);
     setError("");
-    onReset();
     handleChainSelect(chainId);
   }
 
   const fetchQuote = useCallback(async () => {
-    if (!address || !selectedToken || isDirectUSDC || !invoice) return;
+    if (!address || !selectedToken || isDirectUSDC) return;
     setLoadingQuote(true);
     setError("");
     try {
-      const resp = await getQuote({ tokenIn: selectedToken.address, tokenInChainId: selectedChainId, amount: invoice.amount, swapper: address });
+      const resp = await getQuote({ tokenIn: selectedToken.address, tokenInChainId: selectedChainId, amount: amountBaseUnits, swapper: address });
       setQuote(resp);
       setStep("quote");
     } catch (err) {
@@ -189,16 +211,61 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
     } finally {
       setLoadingQuote(false);
     }
-  }, [address, selectedToken, isDirectUSDC, invoice, selectedChainId]);
+  }, [address, selectedToken, isDirectUSDC, selectedChainId]);
 
-  function doTransfer() {
-    if (!usdcToken || !invoice) return;
-    setStep("transferring");
-    writeContract({ address: usdcToken.address as Hex, abi: ERC20_ABI, functionName: "transfer", args: [invoice.merchantAddress as Hex, BigInt(invoice.amount)] });
+  async function doGaslessUSDCPay() {
+    if (!usdcToken || !address) return;
+    setError("");
+    setStep("signing-usdc-permit");
+    try {
+      // 1. Get permit data from backend
+      const ptx = await getPayTx(selectedChainId, amountBaseUnits);
+      setPayTxData(ptx);
+
+      // 2. Read current nonce for permit
+      // (The nonce is read on-chain via useReadContract, but we need it dynamically)
+      const nonceResp = await fetch(
+        `https://${selectedChainId === 84532 ? "sepolia.base.org" : selectedChainId === 1301 ? "sepolia.unichain.org" : "ethereum-sepolia-rpc.publicnode.com"}`,
+        { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to: usdcToken.address, data: "0x7ecebe00" + address.slice(2).padStart(64, "0") }, "latest"], id: 1 }) }
+      );
+      const nonceData = await nonceResp.json();
+      const nonce = parseInt(nonceData.result, 16).toString();
+
+      // 3. Sign EIP-2612 permit
+      signUSDCPermit({
+        domain: {
+          name: ptx.permit.domain.name,
+          version: ptx.permit.domain.version,
+          chainId: BigInt(ptx.permit.domain.chain_id),
+          verifyingContract: ptx.permit.domain.verifying_contract as Hex,
+        },
+        types: {
+          Permit: [
+            { name: "owner", type: "address" },
+            { name: "spender", type: "address" },
+            { name: "value", type: "uint256" },
+            { name: "nonce", type: "uint256" },
+            { name: "deadline", type: "uint256" },
+          ],
+        },
+        primaryType: "Permit",
+        message: {
+          owner: address,
+          spender: ptx.permit.spender as Hex,
+          value: BigInt(ptx.amount),
+          nonce: BigInt(nonce),
+          deadline: BigInt(ptx.deadline),
+        },
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to prepare payment");
+      setStep("error");
+    }
   }
 
   async function handlePayWithSwap() {
-    if (!address || !selectedToken || !invoice) { setError("Missing data."); setStep("error"); return; }
+    if (!address || !selectedToken || !address) { setError("Missing data."); setStep("error"); return; }
 
     // Step 0: if token not approved to Permit2, do ERC-20 approve first
     if (needsPermit2Approval) {
@@ -217,10 +284,10 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
   }
 
   async function proceedToPermitSign() {
-    if (!address || !selectedToken || !invoice) { setError("Missing data."); setStep("error"); return; }
+    if (!address || !selectedToken || !address) { setError("Missing data."); setStep("error"); return; }
     setStep("signing-permit");
     try {
-      const freshResp = await getQuote({ tokenIn: selectedToken.address, tokenInChainId: selectedChainId, amount: invoice.amount, swapper: address });
+      const freshResp = await getQuote({ tokenIn: selectedToken.address, tokenInChainId: selectedChainId, amount: amountBaseUnits, swapper: address });
       setQuote(freshResp);
       if (!freshResp.permitData) { await executeSwapWithPermit(undefined, freshResp); return; }
       pendingQuoteRef = freshResp;
@@ -264,9 +331,7 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
             chains={chains}
             selected={chain}
             onSelect={(id) => chain?.chainId === id ? undefined : handleChangeChain(id)}
-            disabled={creating}
           />
-          {creating && <p className="text-xs text-muted-foreground">Switching network...</p>}
         </div>
       )}
 
@@ -317,11 +382,11 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
           {/* Action button */}
           {isDirectUSDC ? (
             <button
-              onClick={doTransfer}
-              disabled={transferPending}
+              onClick={doGaslessUSDCPay}
+              disabled={usdcPermitPending}
               className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
             >
-              {transferPending ? "Confirm in wallet..." : `Pay ${product.price} USDC`}
+              {usdcPermitPending ? "Sign permit in wallet..." : `Pay ${product.price} USDC (gasless)`}
             </button>
           ) : (
             <button
@@ -402,8 +467,14 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
       {step === "transferring" && (
         <StatusMessage status="pending">{transferPending ? "Confirm transfer in wallet..." : "Waiting for transfer confirmation..."}</StatusMessage>
       )}
+      {step === "signing-usdc-permit" && (
+        <StatusMessage status="pending">{usdcPermitPending ? "Sign the permit in your wallet (gasless)..." : "Preparing gasless payment..."}</StatusMessage>
+      )}
+      {step === "submitting-pay" && (
+        <StatusMessage status="pending">Payment submitted! The shop is broadcasting your transaction...</StatusMessage>
+      )}
       {step === "done" && (() => {
-        const txHash = swapHash ?? transferHash;
+        const txHash = submitPayHash ?? swapHash ?? transferHash;
         const explorerUrl = chain?.explorer && txHash ? `${chain.explorer}/tx/${txHash}` : undefined;
         return (
           <StatusMessage status="success">

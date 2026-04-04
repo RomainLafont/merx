@@ -2,9 +2,9 @@ import { useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useAccount } from "wagmi";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getMerchantBalances, listInvoices, sweep, getChains } from "@/lib/api";
+import { getMerchantBalances, listInvoices, sweep, refund, getChains } from "@/lib/api";
 import { shortenAddress, formatUSDC } from "@/lib/format";
-import { chainName } from "@/lib/chains";
+import { chainName, txExplorerURL, arcTxURL } from "@/lib/chains";
 import type { ChainInfo } from "@/types/chain";
 import { chainIcon } from "@/lib/chainIcons";
 import { MERCHANT_ADDRESS } from "@/lib/constants";
@@ -13,8 +13,8 @@ import type { Invoice } from "@/types/invoice";
 const ARC_CHAIN_ID = 5042002;
 
 export function DashboardPage() {
-  const { address } = useAccount();
-  const isMerchant = address?.toLowerCase() === MERCHANT_ADDRESS.toLowerCase();
+  const { address, isConnected } = useAccount();
+  const isMerchant = isConnected && address?.toLowerCase() === MERCHANT_ADDRESS.toLowerCase();
 
   if (!isMerchant) {
     return <Navigate to="/" replace />;
@@ -33,15 +33,10 @@ export function DashboardPage() {
     refetchInterval: 10_000,
   });
 
-  const { data: chainsData } = useQuery<ChainInfo[]>({
+  const { data: chains } = useQuery<ChainInfo[]>({
     queryKey: ["chains"],
     queryFn: getChains,
   });
-
-  function explorerTxUrl(chainId: number, txHash: string): string | undefined {
-    const c = chainsData?.find((ch) => ch.chainId === chainId);
-    return c?.explorer ? `${c.explorer}/tx/${txHash}` : undefined;
-  }
 
   const [sweeping, setSweeping] = useState(false);
   const [sweepResult, setSweepResult] = useState<string | null>(null);
@@ -102,7 +97,7 @@ export function DashboardPage() {
           <p className="text-muted-foreground text-sm">Loading...</p>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {balances?.balances.map((b) => {
+            {balances?.balances.slice().sort((a, b) => a.chain.localeCompare(b.chain)).map((b) => {
               const human = formatUSDC(b.balance);
               const isZero = b.balance === "0";
               return (
@@ -138,7 +133,9 @@ export function DashboardPage() {
           </div>
           <div className="text-right">
             <p className="text-xs text-muted-foreground">Earning yield</p>
-            <p className="text-xs text-success font-medium">cUSDCv3</p>
+            <p className="text-lg text-success font-bold">
+              {balances?.compoundAPY ?? "0"}% APY
+            </p>
           </div>
         </div>
       </div>
@@ -246,7 +243,7 @@ export function DashboardPage() {
               .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
               .slice(0, 10)
               .map((inv) => (
-                <InvoiceRow key={inv.id} invoice={inv} explorerTxUrl={explorerTxUrl} />
+                <InvoiceRow key={inv.id} invoice={inv} chains={chains ?? []} onRefunded={() => queryClient.invalidateQueries({ queryKey: ["merchant-balances"] })} />
               ))}
           </div>
         )}
@@ -255,37 +252,178 @@ export function DashboardPage() {
   );
 }
 
-function InvoiceRow({ invoice, explorerTxUrl }: { invoice: Invoice; explorerTxUrl: (chainId: number, txHash: string) => string | undefined }) {
-  const txUrl = invoice.txHash ? explorerTxUrl(invoice.chainId, invoice.txHash) : undefined;
+const statusConfig: Record<string, { color: string; label: string }> = {
+  pending:    { color: "bg-muted/50 text-muted-foreground", label: "Pending" },
+  paid:       { color: "bg-primary/20 text-primary",         label: "Paid" },
+  bridging:   { color: "bg-yellow-500/20 text-yellow-600",   label: "Bridging" },
+  attesting:  { color: "bg-orange-500/20 text-orange-600",   label: "Attesting" },
+  settled:    { color: "bg-success/20 text-success",          label: "Settled" },
+  refunding:  { color: "bg-purple-500/20 text-purple-400",    label: "Refunding" },
+  refunded:   { color: "bg-purple-500/20 text-purple-500",    label: "Refunded" },
+};
+
+function InvoiceRow({ invoice, chains, onRefunded }: { invoice: Invoice; chains: ChainInfo[]; onRefunded: () => void }) {
+  const displayStatus = invoice.refundTxHash
+    ? "refunded"        // destination mint done
+    : invoice.refundArcTxHash
+      ? "refunding"     // Arc burn done, waiting for destination
+      : invoice.status;
+  const cfg = statusConfig[displayStatus] ?? statusConfig.pending;
+  const isRefunded = displayStatus === "refunded" || displayStatus === "refunding";
+  const [showRefund, setShowRefund] = useState(false);
+  const [refundChainId, setRefundChainId] = useState(invoice.chainId);
+  const [refunding, setRefunding] = useState(false);
+  const [refundError, setRefundError] = useState("");
+
+  const sourceTxURL = invoice.txHash ? txExplorerURL(invoice.chainId, invoice.txHash) : null;
+  const arcURL = invoice.arcTxHash ? arcTxURL(invoice.arcTxHash) : null;
+  const refundChain = invoice.refundChainId ?? 0;
+  const refundTxURL = invoice.refundTxHash ? txExplorerURL(refundChain, invoice.refundTxHash) : null;
+  const canRefund = !isRefunded && invoice.status !== "pending";
+
+  async function handleRefund() {
+    setRefunding(true);
+    setRefundError("");
+    try {
+      await refund({ invoiceId: invoice.id, to: invoice.payerAddress ?? "", chainId: refundChainId, amount: invoice.amount });
+      setShowRefund(false);
+      onRefunded();
+    } catch (err) {
+      setRefundError(err instanceof Error ? err.message : "Refund failed");
+    } finally {
+      setRefunding(false);
+    }
+  }
 
   return (
-    <div className="rounded-lg border border-border bg-card px-4 py-3 flex items-center justify-between text-sm">
-      <div className="flex items-center gap-3">
-        <span
-          className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-            invoice.status === "paid"
-              ? "bg-success/20 text-success"
-              : "bg-primary/20 text-primary"
-          }`}
-        >
-          {invoice.status}
-        </span>
-        <span className="text-muted-foreground">{invoice.description}</span>
+    <div className="rounded-lg border border-border bg-card px-4 py-3 space-y-2 text-sm">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${cfg.color}`}>
+            {cfg.label}
+          </span>
+          <span className="text-muted-foreground">{invoice.description}</span>
+          {invoice.payerAddress && <CopyAddress address={invoice.payerAddress} />}
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="flex items-center gap-1 text-muted-foreground text-xs">
+            {chainIcon(invoice.chainId) && <img src={chainIcon(invoice.chainId)} alt="" className="h-3.5 w-3.5 rounded-full" />}
+            {chainName(invoice.chainId)}
+          </span>
+          <span className="font-semibold">{invoice.amountHuman} USDC</span>
+          {canRefund && !showRefund && (
+            <button onClick={() => setShowRefund(true)} className="text-xs text-primary hover:underline">
+              Refund
+            </button>
+          )}
+        </div>
       </div>
-      <div className="flex items-center gap-4">
-        <span className="flex items-center gap-1 text-muted-foreground text-xs">
-          {chainIcon(invoice.chainId) && <img src={chainIcon(invoice.chainId)} alt="" className="h-3.5 w-3.5 rounded-full" />}
-          {chainName(invoice.chainId)}
-        </span>
-        <span className="font-semibold">{invoice.amountHuman} USDC</span>
-        {invoice.txHash && (
-          txUrl ? (
-            <a href={txUrl} target="_blank" rel="noopener noreferrer" className="font-mono text-xs text-primary hover:underline">{shortenAddress(invoice.txHash)}</a>
-          ) : (
-            <span className="font-mono text-xs text-muted-foreground">{shortenAddress(invoice.txHash)}</span>
-          )
-        )}
-      </div>
+
+      {/* Tx links */}
+      {/* Payment txs (one line) */}
+      {(invoice.txHash || invoice.arcTxHash) && (
+        <div className="flex flex-wrap gap-x-4 text-xs font-mono">
+          {invoice.txHash && (
+            sourceTxURL ? (
+              <a href={sourceTxURL} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                Payment ({chainName(invoice.chainId)}): {shortenAddress(invoice.txHash)}
+              </a>
+            ) : (
+              <span className="text-muted-foreground">Payment: {shortenAddress(invoice.txHash)}</span>
+            )
+          )}
+          {invoice.arcTxHash && (
+            <a href={arcURL!} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+              Settlement (Arc): {shortenAddress(invoice.arcTxHash)}
+            </a>
+          )}
+        </div>
+      )}
+      {/* Refund txs (one line) */}
+      {(invoice.refundArcTxHash || invoice.refundTxHash) && (
+        <div className="flex flex-wrap gap-x-4 text-xs font-mono">
+          {invoice.refundArcTxHash && (
+            <a href={arcTxURL(invoice.refundArcTxHash)} target="_blank" rel="noopener noreferrer" className="text-purple-500 hover:underline">
+              Refund burn (Arc): {shortenAddress(invoice.refundArcTxHash)}
+            </a>
+          )}
+          {invoice.refundTxHash && (
+            refundTxURL ? (
+              <a href={refundTxURL} target="_blank" rel="noopener noreferrer" className="text-purple-500 hover:underline">
+                Refund mint ({chainName(refundChain)}): {shortenAddress(invoice.refundTxHash)}
+              </a>
+            ) : (
+              <span className="text-purple-500">Refund mint: pending...</span>
+            )
+          )}
+        </div>
+      )}
+
+      {/* Refund panel */}
+      {showRefund && (
+        <div className="rounded-md border border-border bg-secondary/50 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-muted-foreground">Refund to chain:</label>
+            <select
+              value={refundChainId}
+              onChange={(e) => setRefundChainId(Number(e.target.value))}
+              className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+            >
+              {chains.map((c) => (
+                <option key={c.chainId} value={c.chainId}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRefund}
+              disabled={refunding}
+              className="rounded-md bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50 transition-colors"
+            >
+              {refunding ? "Refunding..." : `Refund ${invoice.amountHuman} USDC`}
+            </button>
+            <button
+              onClick={() => { setShowRefund(false); setRefundError(""); }}
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+          </div>
+          {refundError && <p className="text-xs text-destructive">{refundError}</p>}
+        </div>
+      )}
     </div>
+  );
+}
+
+function CopyAddress({ address }: { address: string }) {
+  const [copied, setCopied] = useState(false);
+
+  function handleCopy() {
+    navigator.clipboard.writeText(address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 text-xs font-mono text-muted-foreground">
+      {shortenAddress(address)}
+      <button
+        onClick={handleCopy}
+        title={copied ? "Copied!" : "Copy Address"}
+        className="p-0.5 rounded hover:bg-accent transition-colors cursor-pointer"
+      >
+        {copied ? (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-success">
+            <path fillRule="evenodd" d="M12.416 3.376a.75.75 0 0 1 .208 1.04l-5 7.5a.75.75 0 0 1-1.154.114l-3-3a.75.75 0 0 1 1.06-1.06l2.353 2.353 4.493-6.74a.75.75 0 0 1 1.04-.207Z" clipRule="evenodd" />
+          </svg>
+        ) : (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground">
+            <path d="M5.5 3.5A1.5 1.5 0 0 1 7 2h5.5A1.5 1.5 0 0 1 14 3.5V9a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 9V3.5Z" />
+            <path d="M3 5a1 1 0 0 0-1 1v7.5A1.5 1.5 0 0 0 3.5 15H11a1 1 0 0 0 1-1v-.5H7A2.5 2.5 0 0 1 4.5 11V5H3Z" />
+          </svg>
+        )}
+      </button>
+    </span>
   );
 }
