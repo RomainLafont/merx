@@ -1,5 +1,5 @@
 // Admin refund script: sends USDC to a customer on any supported chain
-// via the Gateway Forwarding Service.
+// via Gateway burn intents + self-relay gatewayMint.
 //
 // Usage:
 //
@@ -20,22 +20,12 @@ import (
 	"strings"
 	"time"
 
+	merx "github.com/RomainLafont/merx"
 	"github.com/RomainLafont/merx/gateway"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 )
-
-// Testnet-only key. Address: 0x3338A40C3362e6974AA2feCC06a536FF73D6797d
-const defaultPrivateKey = "63de9a8de555c9e160c577087e4d43865f6018aeb5bf919268ed5de5d525a126"
-const defaultAddress = "0x3338A40C3362e6974AA2feCC06a536FF73D6797d"
-
-var testnetUSDC = map[uint32]common.Address{
-	0:  common.HexToAddress("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"), // Ethereum Sepolia
-	1:  common.HexToAddress("0x5425890298aed601595a70AB815c96711a31Bc65"), // Avalanche Fuji
-	6:  common.HexToAddress("0x036CbD53842c5426634e7929541eC2318f3dCF7e"), // Base Sepolia
-	10: common.HexToAddress("0x31d0220469e10c4E71834a79b1f276d740d3768F"), // Unichain Sepolia
-}
 
 var t0 = time.Now()
 
@@ -67,7 +57,7 @@ func main() {
 		keyHex = os.Getenv("PRIVATE_KEY")
 	}
 	if keyHex == "" {
-		keyHex = defaultPrivateKey
+		keyHex = merx.DefaultPrivateKey
 	}
 
 	key, err := crypto.HexToECDSA(strings.TrimPrefix(keyHex, "0x"))
@@ -132,11 +122,11 @@ func main() {
 			fatal("source domain %d not found in /v1/info", a.Domain)
 		}
 
-		srcUSDC, ok := testnetUSDC[a.Domain]
+		srcUSDC, ok := merx.TestnetUSDC[a.Domain]
 		if !ok {
 			fatal("no known USDC address for source domain %d", a.Domain)
 		}
-		dstUSDC, ok := testnetUSDC[dst]
+		dstUSDC, ok := merx.TestnetUSDC[dst]
 		if !ok {
 			fatal("no known USDC address for destination domain %d", dst)
 		}

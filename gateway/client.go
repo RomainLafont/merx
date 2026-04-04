@@ -79,6 +79,9 @@ func NewClient(cfg Config) (*Client, error) {
 // SignerAddress returns the address derived from the client's private key.
 func (c *Client) SignerAddress() common.Address { return c.signer }
 
+// Key returns the client's private key (needed for on-chain tx signing).
+func (c *Client) Key() *ecdsa.PrivateKey { return c.key }
+
 // ---------------------------------------------------------------------------
 // Gateway API methods
 // ---------------------------------------------------------------------------

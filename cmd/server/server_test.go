@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	merx "github.com/RomainLafont/merx"
 	"github.com/RomainLafont/merx/gateway"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -33,7 +36,15 @@ func setupServer(t *testing.T) *server {
 	if err != nil {
 		t.Fatalf("GetInfo: %v", err)
 	}
-	return &server{client: client, info: info}
+	paymasterABI, err := abi.JSON(strings.NewReader(payWithPermitABIJSON))
+	if err != nil {
+		t.Fatalf("parse paymaster ABI: %v", err)
+	}
+	arcReceiverABI, err := abi.JSON(strings.NewReader(relayAndDepositABIJSON))
+	if err != nil {
+		t.Fatalf("parse flush ABI: %v", err)
+	}
+	return &server{client: client, info: info, paymasterABI: paymasterABI, arcReceiverABI: arcReceiverABI}
 }
 
 func TestHandleInfo(t *testing.T) {
@@ -81,6 +92,103 @@ func TestHandleBalances(t *testing.T) {
 		t.Fatal("no balances returned")
 	}
 	t.Logf("balances: %d entries", len(resp.Balances))
+}
+
+// setupServerOffline creates a server without calling the live Gateway API.
+// Sufficient for handlers that don't need Gateway info (e.g. pay-tx).
+func setupServerOffline(t *testing.T) *server {
+	t.Helper()
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := gateway.NewClient(gateway.Config{PrivateKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymasterABI, err := abi.JSON(strings.NewReader(payWithPermitABIJSON))
+	if err != nil {
+		t.Fatalf("parse paymaster ABI: %v", err)
+	}
+	arcReceiverABI, err := abi.JSON(strings.NewReader(relayAndDepositABIJSON))
+	if err != nil {
+		t.Fatalf("parse flush ABI: %v", err)
+	}
+	return &server{client: client, paymasterABI: paymasterABI, arcReceiverABI: arcReceiverABI}
+}
+
+// fakePaymaster is a dummy address used in tests.
+var fakePaymaster = common.HexToAddress("0x1111111111111111111111111111111111111111")
+
+func TestHandlePayTx(t *testing.T) {
+	// Temporarily register a fake paymaster for Unichain Sepolia.
+	merx.ShopPaymaster[1301] = fakePaymaster
+	defer delete(merx.ShopPaymaster, 1301)
+
+	s := setupServerOffline(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/pay-tx?chain_id=1301&amount=1000000", nil)
+	w := httptest.NewRecorder()
+	s.handlePayTx(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp payTxResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if resp.ChainID != 1301 {
+		t.Fatalf("unexpected chain_id: %d", resp.ChainID)
+	}
+	if resp.Amount != "1000000" {
+		t.Fatalf("unexpected amount: %s", resp.Amount)
+	}
+	if resp.Deadline == "" {
+		t.Fatal("expected deadline")
+	}
+	if resp.Permit.Spender != fakePaymaster.Hex() {
+		t.Fatalf("unexpected permit spender: %s", resp.Permit.Spender)
+	}
+	if resp.Permit.Domain.Name != "USDC" {
+		t.Fatalf("unexpected domain name: %s", resp.Permit.Domain.Name)
+	}
+	if resp.Permit.Domain.ChainID != 1301 {
+		t.Fatalf("unexpected domain chain_id: %d", resp.Permit.Domain.ChainID)
+	}
+}
+
+func TestHandlePayTx_Validation(t *testing.T) {
+	s := setupServerOffline(t)
+
+	tests := []struct {
+		name  string
+		query string
+		code  int
+	}{
+		{"missing chain_id", "amount=1000000", http.StatusBadRequest},
+		{"missing amount", "chain_id=1301", http.StatusBadRequest},
+		{"invalid chain_id", "chain_id=abc&amount=1000000", http.StatusBadRequest},
+		{"unsupported chain", "chain_id=999&amount=1000000", http.StatusBadRequest},
+		{"invalid amount", "chain_id=1301&amount=abc", http.StatusBadRequest},
+		{"zero amount", "chain_id=1301&amount=0", http.StatusBadRequest},
+		{"negative amount", "chain_id=1301&amount=-1", http.StatusBadRequest},
+		{"no paymaster deployed", "chain_id=1301&amount=1000000", http.StatusBadRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/pay-tx?"+tt.query, nil)
+			w := httptest.NewRecorder()
+			s.handlePayTx(w, req)
+
+			if w.Code != tt.code {
+				t.Fatalf("expected %d, got %d: %s", tt.code, w.Code, w.Body.String())
+			}
+		})
+	}
 }
 
 func TestHandleRefund_Validation(t *testing.T) {

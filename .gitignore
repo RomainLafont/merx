@@ -6,3 +6,11 @@ config.yaml
 # Go binaries
 *.exe
 *.test
+/server
+/refund
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/lib/

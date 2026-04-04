@@ -4,24 +4,26 @@
 
 POC de boutique on-chain dont la trésorerie est centrée sur Circle Gateway :
 
-1. Le client paie en USDC depuis une chain supportée (gasless via ERC-3009).
-2. La boutique accumule une balance Gateway unifiée.
-3. Une partie de cette balance est sweep vers un vault de yield sur Base.
-4. La boutique peut rembourser instantanément un client sur une autre chain.
+1. Le client paie en USDC depuis une chain supportée — le backend prépare une tx `depositForBurnWithHook` que le client signe et exécute.
+2. Le CCTP V2 Forwarding Service bridge l'USDC vers Arc (domain 26) et le dépose automatiquement dans Gateway en une seule tx.
+3. La boutique accumule une balance Gateway unifiée.
+4. Une partie de cette balance est sweep vers un vault de yield sur Base.
+5. La boutique peut rembourser instantanément un client sur une autre chain.
 
 ---
 
 ## Décisions structurantes
 
-### D1. Paiement entrant : ERC-3009 en primaire
+### D1. Paiement entrant : CCTP V2 Forwarding Service vers Arc
 
-Le flux primaire utilise une autorisation USDC `ERC-3009` signée off-chain, puis relayée on-chain par le backend.
+Le client exécute une seule tx `depositForBurnWithHook` sur la source chain. Le Forwarding Service de Circle bridge l'USDC vers Arc (domain 26) et dépose automatiquement dans Gateway — pas de `depositFor` ni de contrat intermédiaire côté source.
 
 Pourquoi :
 
-- Vrai first-use gasless sur USDC — aucune approval préalable nécessaire
-- Le backend relaie la tx sans que `msg.sender` soit le client
-- Permit2 nécessite une approval ERC20 initiale (confirmé) → fallback optionnel uniquement
+- Une seule tx côté client (pas de relayer, pas de PaymentRouter)
+- Le Forwarding Service gère le mint + dépôt sur Arc automatiquement
+- Pas besoin de gas ni de wallet côté destination
+- Le backend prépare la tx non signée via `GET /api/pay-tx`, le client la signe et l'exécute lui-même
 
 ### D2. Gateway : primitives réelles
 
@@ -29,8 +31,8 @@ Le client Gateway est construit autour des vraies primitives Circle :
 
 - `TransferSpec` (14 champs, types vérifiés)
 - `BurnIntent` (3 champs)
-- `depositFor(address token, address depositor, uint256 value)`
 - `/v1/estimate` pour `maxFee` et `maxBlockHeight`
+- CCTP V2 `depositForBurnWithHook` pour le bridge source → Arc + dépôt Gateway
 
 ### D3. Sweep : composition explicite via TreasuryComposer
 
@@ -50,10 +52,10 @@ Le Forwarding Service gère le mint destination automatiquement :
 
 ### D5. Confirmation de paiement en 2 phases
 
-1. Succès on-chain du `PaymentRouter` → event `PaymentReceived`
-2. Disponibilité réelle dans Gateway via `/v1/deposits` puis `/v1/balances`
+1. Succès on-chain du `depositForBurnWithHook` sur la source chain → event CCTP `DepositForBurn`
+2. Disponibilité réelle dans Gateway via `/v1/deposits` puis `/v1/balances` sur Arc
 
-Un event `PaymentReceived` ne prouve pas que la balance unifiée est spendable.
+Un event `DepositForBurn` sur la source ne prouve pas que la balance Gateway est spendable — il faut attendre le mint sur Arc.
 
 ---
 
@@ -68,26 +70,25 @@ Finalité Gateway ~20 min sur ces testnets. Non bloquant pour la démo : les ét
 ## Architecture
 
 ```
-CLIENT (wallet)
+CLIENT (wallet, source chain)
   │
-  │ signe ERC-3009 auth off-chain
+  │ GET /api/pay-tx → reçoit tx non signée
+  │ signe et exécute depositForBurnWithHook(...)
   ▼
-BACKEND  POST /api/pay
-  │
-  │ relaie la tx, paie le gas
+TokenMessengerV2 (source chain)
+  │ burn USDC + hookData = "cctp-forward"
+  │ destinationDomain = 26 (Arc)
+  │ mintRecipient = Gateway Wallet sur Arc
   ▼
-PaymentRouter (source chain)
-  1. usdc.receiveWithAuthorization(from, this, value, ...)
-  2. gatewayWallet.depositFor(usdc, shop, amount)
-  3. emit PaymentReceived(orderId, from, value)
-  │
+Circle Forwarding Service
+  │ atteste le burn, mint automatiquement sur Arc
+  │ dépose dans Gateway Wallet
   ▼
-Gateway Wallet ──► Gateway offchain ledger (balance unifiée)
+Gateway offchain ledger (balance unifiée sur Arc)
   │
   ├──► F5 watcher
-  │      écoute PaymentReceived on-chain
   │      poll /v1/deposits + /v1/balances
-  │      log: router_confirmed → gateway_available
+  │      log: cctp_burned → gateway_available
   │
   ├──► F7 sweep (vers Base)
   │      burn intent(s) → attestation
@@ -108,11 +109,10 @@ Gateway Wallet ──► Gateway offchain ledger (balance unifiée)
 F1: Gateway client + types + signer
 F2: Gateway smoke tests
   └── depends on F1
-F3: PaymentRouter contract (ERC-3009 primary)
-F4: Relayer backend
-  └── depends on F3
+F3: Pay-tx endpoint (prépare la tx depositForBurnWithHook pour le client)
+  └── depends on F1
 F5: Payment watcher
-  └── depends on F3, F4
+  └── depends on F3
 F6: TreasuryComposer contract + vault
   └── depends on F1
 F7: Sweep script (Gateway → Base → vault)
@@ -284,163 +284,153 @@ go run cmd/gateway-smoke-selfmint/main.go \
 
 ---
 
-## F3 — PaymentRouter contract
+## F3 — Pay-tx endpoint
 
-Recevoir un paiement USDC signé off-chain par le client, puis le déposer dans Gateway au nom de la boutique.
+Préparer une transaction `depositForBurnWithHook` non signée que le client récupère, signe et exécute lui-même. Plus besoin de PaymentRouter ni de relayer — le client interagit directement avec le TokenMessengerV2 de CCTP.
 
-### Adresses USDC
+### Principe
 
-- Base Sepolia : `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
-- Unichain Sepolia : `0x31d0220469e10c4E71834a79b1f276d740d3768F`
+Le backend expose un endpoint `GET /api/pay-tx` qui retourne les données nécessaires pour construire la tx côté client (calldata, adresse cible, chain info). Le client doit au préalable avoir approuvé le TokenMessengerV2 pour le montant USDC.
 
-### Interface
+### Adresses
+
+| Chain | Domain | USDC | TokenMessengerV2 |
+|-------|--------|------|------------------|
+| Unichain Sepolia | 10 | `0x31d0220469e10c4E71834a79b1f276d740d3768F` | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
+| Base Sepolia | 6 | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
+| Ethereum Sepolia | 0 | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
+
+- **Arc Testnet** : domain 26
+- **Gateway Wallet** : `0x0077777d7EBA4688BDeF3E311b846F25870A19B9` (mintRecipient sur Arc)
+
+### Fonction CCTP V2 appelée par le client
 
 ```solidity
-function payWithAuthorization(
-    address from,
-    uint256 value,
-    uint256 validAfter,
-    uint256 validBefore,
-    bytes32 nonce,
-    uint8 v,
-    bytes32 r,
-    bytes32 s,
-    bytes32 orderId
+function depositForBurnWithHook(
+    uint256 amount,
+    uint32 destinationDomain,       // 26 (Arc)
+    bytes32 mintRecipient,          // Gateway Wallet sur Arc, left-padded
+    address burnToken,              // USDC sur source chain
+    bytes32 destinationCaller,      // 0x0 (permissionless, forwarding service)
+    uint256 maxFee,                 // couvre protocol fee + forwarding fee
+    uint32 minFinalityThreshold,    // 0 pour fast transfer
+    bytes calldata hookData         // magic bytes "cctp-forward"
 ) external;
 ```
 
-### Flow interne
+### hookData pour le Forwarding Service
 
-1. `usdc.receiveWithAuthorization(from, address(this), value, validAfter, validBefore, nonce, v, r, s)`
-2. `gatewayWallet.depositFor(address(usdc), shopAddress, value)`
-3. emit `PaymentReceived(orderId, from, value)`
-
-### Allowance
-
-`depositFor()` tire l'USDC du caller via `transferFrom`. Le PaymentRouter doit avoir approuvé le GatewayWallet.
-
-**Dans le constructor** : `usdc.approve(gatewayWallet, type(uint256).max)`.
-
-### Tests Foundry
-
-- Vérifier que `PaymentReceived` est émis
-- Vérifier que le router finit avec 0 USDC
-- Vérifier que l'approve vers GatewayWallet existe
-
-### Validation
-
-```bash
-# 1. Tests Foundry
-forge test --match-contract PaymentRouterTest -vvv
-# attendu :
-#   - event PaymentReceived(orderId, from, value) émis
-#   - router.balanceOf(usdc) == 0 après le call
-#   - allowance(router, gatewayWallet) == type(uint256).max
-
-# 2. Test sur fork Base Sepolia
-forge test --fork-url $BASE_SEPOLIA_RPC --match-contract PaymentRouterTest -vvv
-# attendu : même résultats avec le vrai contrat USDC
-
-# 3. Déploiement + test manuel
-forge script script/DeployPaymentRouter.s.sol --broadcast --rpc-url $BASE_SEPOLIA_RPC
-# puis appeler payWithAuthorization avec une signature ERC-3009 valide
-# vérifier via cast :
-cast call $ROUTER "usdc()" --rpc-url $BASE_SEPOLIA_RPC    # adresse USDC
-cast call $USDC "allowance(address,address)(uint256)" $ROUTER $GATEWAY_WALLET --rpc-url $BASE_SEPOLIA_RPC
-# attendu : allowance == max uint256
+Format minimal (32 bytes) :
+```
+0x636374702d666f72776172640000000000000000000000000000000000000000
 ```
 
-### Fallback Permit2 (optionnel)
+Layout :
+- bytes 0-23 : magic `"cctp-forward"`
+- bytes 24-27 : version = `0`
+- bytes 28-31 : circle data length = `0`
 
-Si ERC-3009 indisponible sur une chain cible :
+### Fees du Forwarding Service
 
-- Approval ERC20 initiale vers Permit2 obligatoire
-- `owner` du permit passé explicitement
-- Ne pas présenter comme "first-use 0 tx"
+| Destination | Service Fee |
+|-------------|------------|
+| Ethereum | $1.25 USDC |
+| Autres chains | $0.20 USDC |
 
----
+`maxFee` doit couvrir protocol fee + forwarding fee.
 
-## F4 — Relayer backend
+### Endpoint API
 
-Recevoir la signature de paiement du client et soumettre la tx vers `PaymentRouter`.
+```
+GET /api/pay-tx?chain_id=1301&amount=1000000
+```
 
-### Endpoint
+Réponse :
 
 ```json
-POST /api/pay
 {
-  "order_id": "0x...",
-  "chain_id": 84532,
-  "from": "0x...",
-  "value": "1000000",
-  "valid_after": "0",
-  "valid_before": "1735689600",
-  "nonce": "0x...",
-  "v": 27,
-  "r": "0x...",
-  "s": "0x..."
+  "to": "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+  "data": "0x...",
+  "chain_id": 1301,
+  "value": "0",
+  "token": "0x31d0220469e10c4E71834a79b1f276d740d3768F",
+  "approval_needed": {
+    "spender": "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    "amount": "1000000"
+  }
 }
 ```
 
-### Exigences
+Le champ `approval_needed` indique que le client doit d'abord faire un `approve(TokenMessengerV2, amount)` sur le contrat USDC si ce n'est pas déjà fait.
 
-- Allowlist stricte des `chain_id` supportés
-- Allowlist stricte des contrats `PaymentRouter`
-- **Nonce management** : compteur local par chain. `pendingNonce = max(chainNonce, localCounter)`. Retry avec même nonce si tx échoue. Rate limit 1 tx/sec par chain.
-- **Idempotence** : map en mémoire par `order_id` + log append-only NDJSON
-- **Replay NDJSON au startup** : lire le log et reconstruire la map `order_id → tx_hash` au démarrage
-- Retour d'erreur explicite : distinguer revert pré-inclusion (gas estimation failure) vs revert post-inclusion (on-chain revert)
+### Flow complet côté client
+
+1. `GET /api/pay-tx?chain_id=1301&amount=1000000`
+2. Si `approval_needed` → signer et exécuter `usdc.approve(spender, amount)`
+3. Signer et exécuter la tx `depositForBurnWithHook` avec les données retournées
+4. Le Forwarding Service bridge vers Arc et dépose dans Gateway automatiquement
+
+### Implémentation backend
+
+1. Résoudre la source chain (chain_id → domain, USDC address, TokenMessengerV2)
+2. Construire le calldata `depositForBurnWithHook` :
+   - `amount` = montant demandé
+   - `destinationDomain` = 26 (Arc)
+   - `mintRecipient` = Gateway Wallet paddé en bytes32
+   - `burnToken` = USDC sur source chain
+   - `destinationCaller` = bytes32(0)
+   - `maxFee` = estimation via fee constants
+   - `minFinalityThreshold` = 0
+   - `hookData` = `0x636374702d666f727761726400...` (32 bytes)
+3. Retourner la tx non signée
 
 ### Validation
 
 ```bash
-# 1. Démarrer le relayer
-go run cmd/relayer/main.go --port 8080
+# 1. Démarrer le serveur
+PRIVATE_KEY=0x... go run cmd/server/main.go --port 8080
 
-# 2. Envoyer un paiement valide
-curl -X POST http://localhost:8080/api/pay -d '{
-  "order_id": "0x0001",
-  "chain_id": 84532,
-  "from": "0xCLIENT",
-  "value": "1000000",
-  ...signature fields...
-}'
-# attendu : 200 OK, tx_hash retourné
-# vérifier la tx on-chain via cast ou explorateur
+# 2. Récupérer une tx préparée
+curl "http://localhost:8080/api/pay-tx?chain_id=1301&amount=1000000"
+# attendu : JSON avec to, data, chain_id, approval_needed
 
-# 3. Tester l'idempotence
-curl -X POST http://localhost:8080/api/pay -d '{ "order_id": "0x0001", ... }'
-# attendu : 200 OK, même tx_hash retourné (pas de nouvelle tx)
+# 3. Vérifier le calldata
+# décoder le data avec cast pour vérifier les paramètres :
+cast calldata-decode "depositForBurnWithHook(uint256,uint32,bytes32,address,bytes32,uint256,uint32,bytes)" $DATA
+# attendu :
+#   amount = 1000000
+#   destinationDomain = 26
+#   mintRecipient = 0x...0077777d7EBA4688BDeF3E311b846F25870A19B9
+#   burnToken = USDC address de la chain
+#   destinationCaller = 0x0
+#   hookData commence par 0x636374702d666f7277617264
 
-# 4. Tester le replay NDJSON
-# arrêter le relayer, redémarrer, renvoyer order_id "0x0001"
-# attendu : même tx_hash, pas de double-paiement
-
-# 5. Tester chain_id invalide
-curl -X POST http://localhost:8080/api/pay -d '{ "chain_id": 999, ... }'
-# attendu : 400 Bad Request, "unsupported chain"
-
-# 6. Vérifier le fichier NDJSON
-cat payments.ndjson
-# attendu : une ligne par paiement avec order_id, tx_hash, timestamp
+# 4. Test d'intégration (avec wallet funded sur testnet)
+# Exécuter la tx retournée depuis un wallet avec USDC
+# Vérifier que le Forwarding Service mint sur Arc
+# Vérifier /v1/balances augmente
 ```
+
+---
+
+~~F4 — Relayer backend~~ *Supprimé* : plus nécessaire. Le client exécute lui-même la tx `depositForBurnWithHook` — pas besoin de relayer ni de nonce management côté backend.
 
 ---
 
 ## F5 — Payment watcher
 
-Suivre le paiement de bout en bout : succès on-chain du router puis disponibilité effective dans Gateway.
+Suivre le paiement de bout en bout : burn CCTP sur la source chain puis disponibilité effective dans Gateway sur Arc.
 
 ### Comportement
 
-1. Écouter `PaymentReceived` sur chaque chain
-2. Corréler avec `orderId`
-3. Poller `/v1/deposits` et `/v1/balances`
-4. Logger deux états : `router_confirmed` → `gateway_available`
+1. Écouter l'event `DepositForBurn` du TokenMessengerV2 sur chaque source chain (filtrer par `mintRecipient` = Gateway Wallet)
+2. Corréler avec le montant et l'adresse du sender
+3. Poller `/v1/deposits` et `/v1/balances` sur Gateway
+4. Logger deux états : `cctp_burned` → `gateway_available`
 
 ### Corrélation
 
-Si `/v1/deposits` expose le tx hash source → corrélation directe. Sinon → heuristique montant + timestamp + chain.
+Si `/v1/deposits` expose le tx hash source → corrélation directe. Sinon → heuristique montant + timestamp + source domain.
 
 ### Persistence
 
@@ -454,21 +444,17 @@ Si `/v1/deposits` expose le tx hash source → corrélation directe. Sinon → h
 # 1. Démarrer le watcher
 go run cmd/watcher/main.go
 
-# 2. Déclencher un paiement via F4 (relayer)
+# 2. Déclencher un paiement via F3 (pay-tx endpoint + exécution client)
 # attendu dans les logs du watcher :
-#   [router_confirmed] orderId=0x0001 chain=84532 tx=0x... block=12345
-#   ... (attendre finalité Gateway) ...
-#   [gateway_available] orderId=0x0001 balance_delta=+1000000
+#   [cctp_burned] from=0xCLIENT chain=1301 tx=0x... amount=1000000
+#   ... (attendre finalité CCTP + Forwarding Service) ...
+#   [gateway_available] balance_delta=+1000000
 
 # 3. Tester le restart
 # arrêter le watcher, vérifier que state.json contient lastScannedBlock
 cat state.json
-# attendu : {"84532": 12345, "1301": ...}
+# attendu : {"1301": 12345, "84532": ...}
 # redémarrer le watcher → doit reprendre au bon block, pas d'events dupliqués
-
-# 4. Vérifier qu'un paiement non corrélé ne produit pas de faux positif
-# déposer directement dans le Gateway Wallet (pas via PaymentRouter)
-# attendu : le watcher ne log pas de router_confirmed pour ce dépôt
 ```
 
 ---
@@ -657,29 +643,26 @@ go run cmd/refund/main.go --to 0xCLIENT --chain 6 --amount 500000
 Étape 0 : Validation (quelques heures)
   ├── /v1/estimate sans enableForwarder → confirmer ou prévoir fallback hardcodé
   ├── chainId + verifyingContract du domain EIP-712 via /v1/info
-  ├── Aave Base Sepolia accepte Circle USDC ? → décider Aave vs MockVault
-  └── receiveWithAuthorization fonctionne sur Unichain Sepolia
+  └── Aave Base Sepolia accepte Circle USDC ? → décider Aave vs MockVault
 
-Étape 1 : F1 — Gateway client Go (types, signer, HTTP)
+Étape 1 : F1 — Gateway client Go (types, signer, HTTP) ✅
 
-Étape 2 : F2-B — Smoke test forwarding service
+Étape 2 : F2 — Gateway smoke tests ✅
 
-Étape 3 : F8 — Refund script (réutilise F2-B)
+Étape 3 : F8 — Refund script + API server ✅
 
-Étape 4 : F2-A — Smoke test self-managed mint
+Étape 4 : F3 — Pay-tx endpoint (depositForBurnWithHook)
 
               ┌── Track Go ──────────────────┐
-Étape 5 :     │  F4 — Relayer backend        │
-              │  F5 — Payment watcher        │
+Étape 5 :     │  F5 — Payment watcher        │
               ├── Track Solidity ─────────────┤
-              │  F3 — PaymentRouter           │
               │  F6 — TreasuryComposer + vault│
               └──────────────────────────────┘
 
 Étape 6 : F7 — Sweep script (dépend de tout, pré-exécuter avant démo)
 ```
 
-**Logique :** valider Gateway en premier (F1→F2-B→F8), puis le self-managed mint (F2-A), puis paralléliser Go backend et Solidity contracts, terminer par le sweep.
+**Logique :** F1→F2→F8 sont faits. Prochaine étape : F3 (pay-tx endpoint) pour le flow de paiement client. Puis paralléliser watcher Go et TreasuryComposer Solidity, terminer par le sweep.
 
 ---
 
@@ -687,8 +670,8 @@ go run cmd/refund/main.go --to 0xCLIENT --chain 6 --amount 500000
 
 1. Shop wallet pré-financé dans Gateway.
 2. Refund cross-chain rapide (F8) — exécuté live.
-3. Paiement client (F3+F4) — exécuté live.
-4. `router_confirmed` → `gateway_available` — logs en live (ou pré-enregistrés si trop lent).
+3. Paiement client : `GET /api/pay-tx` → client signe → `depositForBurnWithHook` → USDC arrive sur Arc dans Gateway.
+4. `cctp_burned` → `gateway_available` — logs en live (ou pré-enregistrés si trop lent).
 5. Sweep vers vault — montrer le résultat d'un sweep pré-exécuté.
 
 ---
@@ -697,33 +680,25 @@ go run cmd/refund/main.go --to 0xCLIENT --chain 6 --amount 500000
 
 ```
 go.mod
-foundry.toml
 
-internal/gateway/
+gateway/
   client.go              # F1
   types.go               # F1
   signer.go              # F1
+  allocate.go            # F1
 
 cmd/
-  gateway-smoke-selfmint/main.go   # F2-A
-  gateway-smoke-forwarder/main.go  # F2-B
-  refund/main.go                   # F8
-  sweep/main.go                    # F7
+  server/main.go         # F3 (pay-tx endpoint) + F8 (refund endpoints)
+  refund/main.go         # F8 (CLI)
+  sweep/main.go          # F7
 
 contracts/
-  PaymentRouter.sol                # F3
-  TreasuryComposer.sol             # F6
-  MockVault4626.sol                # F6 fallback
+  TreasuryComposer.sol   # F6
+  MockVault4626.sol      # F6 fallback
   test/
-    PaymentRouter.t.sol
     TreasuryComposer.t.sol
 
-internal/relayer/
-  server.go              # F4
-  nonce.go               # F4
-
-internal/watcher/
-  watcher.go             # F5
+cmd/watcher/main.go      # F5
 ```
 
 ---
@@ -734,11 +709,11 @@ internal/watcher/
 - Circle Gateway Technical Guide : https://developers.circle.com/gateway/references/technical-guide
 - Circle Gateway Forwarding Service : https://developers.circle.com/gateway/howtos/forwarding-service
 - Circle Gateway Supported Blockchains : https://developers.circle.com/gateway/references/supported-blockchains
-- CCTP Technical Guide : https://developers.circle.com/cctp/technical-guide
+- CCTP V2 Technical Guide : https://developers.circle.com/cctp/technical-guide
+- CCTP V2 Forwarding Service : https://developers.circle.com/cctp/concepts/forwarding-service
+- CCTP V2 Supported Chains & Domains : https://developers.circle.com/cctp/concepts/supported-chains-and-domains
 - circlefin/evm-gateway-contracts : https://github.com/circlefin/evm-gateway-contracts
 - circlefin/stablecoin-evm : https://github.com/circlefin/stablecoin-evm
 - Circle USDC Addresses : https://developers.circle.com/stablecoins/usdc-contract-addresses
-- ERC-3009 : https://eips.ethereum.org/EIPS/eip-3009
 - Aave V3 Base Sepolia : https://github.com/bgd-labs/aave-address-book/blob/main/src/AaveV3BaseSepolia.sol
 - Aave V3 Docs : https://aave.com/docs/aave-v3/overview
-- Uniswap Permit2 : https://docs.uniswap.org/contracts/permit2/overview

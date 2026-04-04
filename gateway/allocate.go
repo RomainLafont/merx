@@ -3,6 +3,7 @@ package gateway
 import (
 	"math/big"
 	"sort"
+	"strings"
 )
 
 // Allocation represents USDC to draw from a single source domain.
@@ -28,7 +29,7 @@ func AllocateBalances(balances []Balance, target *big.Int, excludeDomain uint32,
 		if forceDomain >= 0 && b.Domain != uint32(forceDomain) {
 			continue
 		}
-		bal, _ := new(big.Int).SetString(b.Balance, 10)
+		bal := parseUSDCBalance(b.Balance)
 		if bal != nil && bal.Sign() > 0 {
 			candidates = append(candidates, entry{domain: b.Domain, balance: bal})
 		}
@@ -57,4 +58,36 @@ func AllocateBalances(balances []Balance, target *big.Int, excludeDomain uint32,
 		return nil
 	}
 	return result
+}
+
+// parseUSDCBalance parses a balance string that may be either an integer ("1000000")
+// or a decimal ("2.499700") and returns the value in base units (6 decimals).
+func parseUSDCBalance(s string) *big.Int {
+	// Try integer first.
+	if v, ok := new(big.Int).SetString(s, 10); ok {
+		return v
+	}
+	// Parse decimal: "2.499700" → 2499700
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	whole, ok := new(big.Int).SetString(parts[0], 10)
+	if !ok {
+		return nil
+	}
+	frac := parts[1]
+	// Pad or truncate to 6 decimal places.
+	for len(frac) < 6 {
+		frac += "0"
+	}
+	frac = frac[:6]
+	fracInt, ok := new(big.Int).SetString(frac, 10)
+	if !ok {
+		return nil
+	}
+	// whole * 1_000_000 + frac
+	whole.Mul(whole, big.NewInt(1_000_000))
+	whole.Add(whole, fracInt)
+	return whole
 }
