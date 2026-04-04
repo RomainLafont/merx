@@ -45,7 +45,7 @@ export function payInvoice(
 export function getMerchantBalances(): Promise<{
   merchant: string;
   total: string;
-  balances: Array<{ chain: string; chainId: number; balance: string }>;
+  balances: Array<{ chain: string; chainId: number; balance: string; nativeBalance: string }>;
   compound: string;
   compoundAPY: string;
 }> {

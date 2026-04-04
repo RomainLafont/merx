@@ -10,6 +10,15 @@ const icons: Record<number, string> = {
   57054:    "/chains/sonic.png",     // Sonic Blaze
   4801:     "/chains/worldchain.png",// Worldchain Sepolia
   1328:     "/chains/sei.png",       // Sei Atlantic
+  59141:    "/chains/linea.png",     // Linea Sepolia
+  812242:   "/chains/codex.png",     // Codex Testnet
+  10143:    "/chains/monad.png",     // Monad Testnet
+  998:      "/chains/hyperevm.png",  // HyperEVM Testnet
+  763373:   "/chains/ink.png",       // Ink Sepolia
+  98867:    "/chains/plume.png",     // Plume Testnet
+  33431:    "/chains/edge.png",      // EDGE Testnet
+  2910:     "/chains/morph.png",     // Morph Hoodi
+  5042002:  "/chains/arc.png",       // Arc Testnet
 };
 
 export function chainIcon(chainId: number): string | undefined {

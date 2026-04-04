@@ -433,9 +433,10 @@ func (s *server) handleChains(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type chainBalance struct {
-	Chain   string `json:"chain"`
-	ChainID int    `json:"chainId"`
-	Balance string `json:"balance"` // base units (6 decimals)
+	Chain         string `json:"chain"`
+	ChainID       int    `json:"chainId"`
+	Balance       string `json:"balance"`       // USDC base units (6 decimals)
+	NativeBalance string `json:"nativeBalance"` // native token in wei
 }
 
 // GET /api/merchant/balances — USDC balances on all chains + Arc.
@@ -494,6 +495,7 @@ func (s *server) handleMerchantBalances(w http.ResponseWriter, r *http.Request) 
 			}
 			defer ethClient.Close()
 
+			// USDC balance.
 			contract := bind.NewBoundContract(q.usdc, balABI, ethClient, ethClient, ethClient)
 			var out []interface{}
 			err = contract.Call(&bind.CallOpts{Context: ctx}, &out, "balanceOf", s.signer)
@@ -501,12 +503,19 @@ func (s *server) handleMerchantBalances(w http.ResponseWriter, r *http.Request) 
 				ch <- result{err: err}
 				return
 			}
+			usdcBal := out[0].(*big.Int)
 
-			bal := out[0].(*big.Int)
+			// Native token balance.
+			nativeBal, err := ethClient.BalanceAt(ctx, s.signer, nil)
+			if err != nil {
+				nativeBal = big.NewInt(0)
+			}
+
 			ch <- result{cb: chainBalance{
-				Chain:   q.name,
-				ChainID: q.chainID,
-				Balance: bal.String(),
+				Chain:         q.name,
+				ChainID:       q.chainID,
+				Balance:       usdcBal.String(),
+				NativeBalance: nativeBal.String(),
 			}}
 		}(q)
 	}

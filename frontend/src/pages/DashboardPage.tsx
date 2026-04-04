@@ -3,7 +3,7 @@ import { Navigate } from "react-router-dom";
 import { useAccount } from "wagmi";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getMerchantBalances, listInvoices, supply, withdraw, refund, getChains } from "@/lib/api";
-import { shortenAddress, formatUSDC } from "@/lib/format";
+import { shortenAddress, formatUSDC, formatNativeBalance } from "@/lib/format";
 import { chainName, txExplorerURL, arcTxURL } from "@/lib/chains";
 import type { ChainInfo } from "@/types/chain";
 import { chainIcon } from "@/lib/chainIcons";
@@ -133,7 +133,9 @@ export function DashboardPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {balances?.balances.slice().sort((a, b) => a.chain.localeCompare(b.chain)).map((b) => {
               const human = formatUSDC(b.balance);
+              const nativeHuman = formatNativeBalance(b.nativeBalance);
               const isZero = b.balance === "0";
+              const nativeIsZero = !b.nativeBalance || b.nativeBalance === "0";
               return (
                 <div
                   key={b.chainId}
@@ -143,11 +145,13 @@ export function DashboardPage() {
                     {chainIcon(b.chainId) && <img src={chainIcon(b.chainId)} alt="" className="h-6 w-6 rounded-full" />}
                     <div>
                       <p className="font-medium text-sm">{b.chain}</p>
-                      <p className="text-xs text-muted-foreground">Chain ID: {b.chainId}</p>
+                      <p className={`text-xs ${nativeIsZero ? "text-destructive" : "text-muted-foreground"}`}>
+                        Gas: {nativeHuman} {b.chainId === 5042002 ? "USDC" : "ETH"}
+                      </p>
                     </div>
                   </div>
                   <span className={`text-lg font-bold ${isZero ? "text-muted-foreground" : "text-foreground"}`}>
-                    {human}
+                    {human} USDC
                   </span>
                 </div>
               );
