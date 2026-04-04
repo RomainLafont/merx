@@ -56,9 +56,17 @@ export function listInvoices(): Promise<Invoice[]> {
   return request("/api/invoices");
 }
 
-// Sweep (bridge to Sepolia + stake to Compound)
-export function sweep(amount: string): Promise<{ txHash: string }> {
-  return request("/api/sweep", {
+// Compound V3 supply (bridge from Arc to Sepolia + supply)
+export function supply(amount: string): Promise<{ txHash: string }> {
+  return request("/api/supply", {
+    method: "POST",
+    body: JSON.stringify({ amount }),
+  });
+}
+
+// Compound V3 withdraw (withdraw from Compound + bridge back to Arc)
+export function withdraw(amount: string): Promise<{ txHash: string }> {
+  return request("/api/withdraw", {
     method: "POST",
     body: JSON.stringify({ amount }),
   });
@@ -90,6 +98,7 @@ export function submitPay(req: {
   deadline: string;
   signature: string;
   description: string;
+  productId: string;
 }): Promise<{ tx_hash: string; chain_id: number; invoice_id: string }> {
   return request("/api/pay", {
     method: "POST",

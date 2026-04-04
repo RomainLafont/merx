@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,7 +45,7 @@ func setupServerOffline(t *testing.T) *server {
 		depositForBurnABI: depositForBurnABI,
 		receiveMessageABI: receiveMessageABI,
 		relayAndSupplyABI: relayAndSupplyABI,
-		invoices:          newInvoiceStore(),
+		invoices:          newInvoiceStore(filepath.Join(t.TempDir(), "invoices.json")),
 	}
 }
 

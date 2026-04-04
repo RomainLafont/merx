@@ -103,6 +103,7 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
   const { signTypedData: signUSDCPermit, data: usdcPermitSig, isPending: usdcPermitPending, error: usdcPermitError } = useSignTypedData();
   const [payTxData, setPayTxData] = useState<Awaited<ReturnType<typeof getPayTx>> | null>(null);
   const [submitPayHash, setSubmitPayHash] = useState<string | null>(null);
+  const [invoiceId, setInvoiceId] = useState<string | null>(null);
 
   // Swap TX
   const { sendTransaction: sendSwap, data: swapHash, isPending: swapPending } = useSendTransaction();
@@ -167,8 +168,10 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
         deadline: payTxData.deadline,
         signature: usdcPermitSig,
         description: `Purchase: ${product.title}`,
+        productId: product.id,
       }).then((res) => {
         setSubmitPayHash(res.tx_hash);
+        setInvoiceId(res.invoice_id);
         setStep("done");
         onPaid();
       }).catch((err) => {
@@ -477,16 +480,31 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
         const txHash = submitPayHash ?? swapHash ?? transferHash;
         const explorerUrl = chain?.explorer && txHash ? `${chain.explorer}/tx/${txHash}` : undefined;
         return (
-          <StatusMessage status="success">
-            Payment confirmed!{" "}
-            {explorerUrl ? (
-              <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">
-                View transaction
+          <div className="space-y-3">
+            <StatusMessage status="success">
+              Payment confirmed!{" "}
+              {explorerUrl ? (
+                <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">
+                  View transaction
+                </a>
+              ) : (
+                <span className="font-mono">{txHash?.slice(0, 10)}...</span>
+              )}
+            </StatusMessage>
+            {invoiceId && (
+              <a
+                href={`/api/ebooks/${invoiceId}`}
+                download
+                className="flex items-center justify-center gap-2 w-full rounded-md bg-success px-4 py-3 text-sm font-medium text-white hover:bg-success/90 transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4">
+                  <path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14H2.75Z" />
+                  <path d="M7.25 7.689V2a.75.75 0 0 1 1.5 0v5.689l1.97-1.969a.749.749 0 1 1 1.06 1.06l-3.25 3.25a.749.749 0 0 1-1.06 0L4.22 6.78a.749.749 0 1 1 1.06-1.06l1.97 1.969Z" />
+                </svg>
+                Download your ebook
               </a>
-            ) : (
-              <span className="font-mono">{txHash?.slice(0, 10)}...</span>
             )}
-          </StatusMessage>
+          </div>
         );
       })()}
       {step === "error" && (

@@ -1,146 +1,170 @@
 # Merx
 
-On-chain ebook shop where customers pay in USDC — or swap from any token via Uniswap. Payments are deposited into Circle Gateway via CCTPv2 for a unified cross-chain merchant balance. The shop can refund to any chain instantly.
+Chain-abstracted ebook shop built on Circle's CCTP V2 and Arc. Customers pay in USDC from any of 18 supported chains — gasless, with a single signature. Payments settle on Arc in ~5 seconds. The merchant can refund to any chain, and earn yield by supplying USDC to Compound V3.
 
 ## Architecture
 
 ```
-Browser (React SPA :5173)  →  Go API server (:8080)  →  Uniswap Trading API
-                                                      →  Circle Gateway API
-                                                      →  CCTP V2 Attestation API
+┌─────────────────────────────────────────────────────────────────┐
+│  Frontend (React + Vite)                                        │
+│  Shop → Checkout → sign EIP-2612 permit (gasless)               │
+│  Dashboard → balances, invoices, supply/withdraw, refund        │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                     Go API server
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+    Uniswap API     CCTP V2 + Arc     Compound V3
+   (token swaps)    (settlement)       (yield)
 ```
 
-### Payment flow (customer → merchant)
-
-**Direct USDC:** Customer sends an ERC-20 `transfer` to the merchant address.
-
-**Swap from any token:**
-1. Customer picks a token (WETH, UNI, etc.) and gets a quote
-2. Signs a Permit2 message (gasless, off-chain)
-3. Confirms the swap transaction (USDC lands in customer wallet)
-4. Confirms the transfer to the merchant
-
-**After payment — Gateway deposit (backend, automatic):**
-1. `USDC.approve(TokenMessengerV2)` on source chain
-2. `TokenMessengerV2.depositForBurn()` — burns USDC, emits CCTP message
-3. Poll CCTP attestation API until complete
-4. `ArcReceiver.relayAndDeposit()` on Arc — mints USDC + deposits into Gateway
-
-### Refund flow (merchant → customer)
+### Payment (customer → merchant)
 
 ```
-POST /api/refund  →  allocate Gateway balances  →  sign burn intents
-  →  Gateway Forwarding Service  →  customer receives USDC on target chain
+Customer wallet (any chain)
+  │  signs EIP-2612 permit (off-chain, zero gas)
+  ▼
+Go backend broadcasts payWithPermit
+  ▼
+ShopPaymaster (source chain)
+  │  permit → transferFrom → depositForBurn
+  ▼
+CCTP V2 Fast Transfer → Arc (~5s)
+  ▼
+Backend self-relays receiveMessage on Arc
+  ▼
+USDC in merchant wallet on Arc
 ```
 
-## Project structure
+The customer never pays gas. The backend pays gas on the source chain via the ShopPaymaster contract and on Arc for the CCTP relay.
+
+On chains with Uniswap support, customers can also pay with any token (WETH, UNI, etc.) — the frontend handles the swap via Permit2, then triggers the same gasless USDC payment flow.
+
+### Refund (merchant → customer)
 
 ```
-registry.yaml              Token registry (chains, tokens, addresses, RPCs)
-params.go                  CCTP domains, USDC addresses, contract addresses
-gateway/                   Gateway client, types, EIP-712 signer, tests
-uniswap-api/config/        Chain config, YAML loader
-uniswap-api/uniswap/       Uniswap Trading API client (quote, swap, approval)
-cmd/server/                API server (invoices, uniswap proxy, gateway, CCTP relay)
-cmd/refund/                Admin refund CLI
-contracts/src/             Solidity: ShopPaymaster, ArcReceiver
-contracts/test/            Foundry tests
-contracts/script/          Deploy scripts
-frontend/                  React + Vite + TypeScript webshop
-  src/pages/               ShopPage (catalog), CheckoutPage (payment)
-  src/components/          PaymentFlow, ProductCard, Layout, ConnectWallet
-  src/lib/                 API client, wagmi config, products, formatting
+Backend calls depositForBurn on Arc → destination chain
+  ▼
+CCTP V2 attestation (~5s from Arc)
+  ▼
+Backend self-relays receiveMessage on destination
+  ▼
+Customer receives USDC
 ```
+
+Refunds can go to any supported chain, not just the chain where the payment originated.
+
+### Yield (merchant treasury)
+
+```
+Arc (USDC) → CCTP → Ethereum Sepolia → CompoundDepositor
+  │                                          │
+  │  depositForBurn + receiveMessage         │  supply to Compound V3
+  │                                          │  (earning yield)
+  ▼                                          ▼
+Withdraw: Compound → CCTP → Arc        cUSDCv3 balance
+```
+
+The merchant can supply idle USDC to Compound V3 for yield, and withdraw back to Arc at any time.
+
+## Why these technologies
+
+| Technology | Role | Why |
+|------------|------|-----|
+| **CCTP V2** | Cross-chain USDC bridge | Native burn/mint — no wrapped tokens, no liquidity pools. Fast Transfer attests before source finality (~5s). |
+| **Arc** | Settlement hub | Sub-second deterministic finality (BFT), no reorgs. Gas paid in USDC — merchant only needs one token. |
+| **EIP-2612 Permit** | Gasless payments | Customer signs off-chain, backend broadcasts. Zero gas for the customer. |
+| **ShopPaymaster** | Atomic permit + bridge | One contract call: permit → transferFrom → CCTP depositForBurn. Deployed per source chain. |
+| **Compound V3** | Yield on idle USDC | Supply/withdraw via CompoundDepositor contract on Ethereum Sepolia. |
+| **Uniswap** | Token swaps | Pay with any token — Permit2 + Universal Router swap WETH/UNI/etc. to USDC atomically. |
 
 ## Quick start
 
 ```bash
-# 1. Start the API server (requires uniswap-api/config.yaml with API key)
+# Backend
 go run cmd/server/main.go
 
-# 2. Start the frontend
+# Frontend
 cd frontend && npm install && npm run dev
 ```
 
-Open http://localhost:5173 — browse ebooks, connect MetaMask, pick a chain and token, pay.
+Open http://localhost:5173 — browse ebooks, connect wallet, pick a chain and pay.
 
-### Configuration
+Merchant dashboard at http://localhost:5173/dashboard (connect with merchant wallet).
 
-**`uniswap-api/config.yaml`** — Uniswap Trading API key:
-```yaml
-uniswap_api_key: "your-key-from-developers.uniswap.org"
-swapper_address: "0xYourAddress"
+## Project structure
+
+```
+params.go                 Shared addresses, chain config, RPC URLs
+registry.yaml             Supported chains, tokens, explorers, CCTP domains
+cmd/server/               Go API server
+contracts/src/            Solidity: ShopPaymaster, CompoundDepositor
+ebooks/                   Downloadable PDFs (served after payment)
+frontend/src/pages/       ShopPage, CheckoutPage, DashboardPage
+frontend/src/components/  PaymentFlow, ChainSelector, ConnectWallet
+frontend/src/lib/         API client, products, chains, formatting
 ```
 
-**`registry.yaml`** — Supported chains, tokens, and RPCs:
-```yaml
-chains:
-  - name: Ethereum Sepolia
-    chainId: 11155111
-    gatewayDomain: 0
-    rpc: "https://ethereum-sepolia-rpc.publicnode.com"
-    tokens:
-      - symbol: USDC
-        decimals: 6
-        address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238"
-      - symbol: WETH
-        decimals: 18
-        address: "0xfff9976782d46cc05630d1f6ebab18b2324d6b14"
-```
-
-## API server
-
-```bash
-go run cmd/server/main.go
-go run cmd/server/main.go --port 3001 --registry registry.yaml
-```
+## API
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/chains` | Supported chains and tokens (from registry.yaml) |
-| POST | `/api/invoices` | Create invoice `{merchantAddress, amount, chainId, description}` |
-| GET | `/api/invoices` | List invoices (optional `?merchant=0x...`) |
-| GET | `/api/invoices/{id}` | Get invoice by ID |
-| POST | `/api/invoices/{id}/pay` | Mark paid `{txHash}`, triggers CCTP→Arc Gateway deposit |
-| POST | `/api/uniswap/quote` | Get swap quote `{tokenIn, tokenInChainId, amount, swapper}` |
-| POST | `/api/uniswap/approval` | Check token approval |
-| POST | `/api/uniswap/swap` | Build swap TX `{quote, signature, permitData}` |
-| GET | `/api/gateway/balances` | Merchant's unified Gateway balance across all domains |
-| GET | `/api/info` | Gateway domains and contracts |
-| GET | `/api/balances` | Shop's Gateway USDC balances (raw) |
-| POST | `/api/refund` | Start cross-chain refund `{to, chain, amount}` |
-| GET | `/api/refund/{id}` | Poll refund status |
+| GET | `/api/chains` | Supported chains and tokens |
+| GET | `/api/pay-tx` | Permit data for gasless payment |
+| POST | `/api/pay` | Submit signed permit, broadcast + bridge to Arc |
+| GET | `/api/balances` | Shop USDC balance on Arc |
+| GET | `/api/merchant/balances` | Balances across all chains + Compound APY |
+| POST | `/api/supply` | Supply USDC from Arc to Compound V3 |
+| POST | `/api/withdraw` | Withdraw from Compound V3, bridge back to Arc |
+| POST | `/api/refund` | Refund to customer on any chain |
+| POST | `/api/invoices` | Create invoice |
+| GET | `/api/invoices` | List invoices |
+| GET | `/api/ebooks/{invoiceId}` | Download purchased ebook PDF |
+| POST | `/api/uniswap/quote` | Get swap quote |
+| POST | `/api/uniswap/swap` | Build swap transaction |
+
+## Supported chains
+
+18 EVM testnets with CCTP V2 (fast transfer or standard < 10s):
+
+Ethereum Sepolia, Avalanche Fuji, OP Sepolia, Arbitrum Sepolia, Base Sepolia, Polygon Amoy, Unichain Sepolia, Sonic Blaze, Worldchain Sepolia, Sei Atlantic, Linea Sepolia, Codex, Monad, HyperEVM, Ink Sepolia, Plume, EDGE, Morph Hoodi.
+
+Settlement chain: **Arc Testnet** (domain 26).
+
+## Deployed contracts
+
+| Contract | Chain | Address |
+|----------|-------|---------|
+| ShopPaymaster | Unichain Sepolia | `0xF9b392b25eA1a7671C4badB0E356cc5457AdC47a` |
+| ShopPaymaster | Base Sepolia | `0xd94617064C8ca3bfE543A6B0190accB2E41b5Af5` |
+| ShopPaymaster | Ethereum Sepolia | `0xb0262c0Cb99329706126Cae0f152C575067e450a` |
+| CompoundDepositor | Ethereum Sepolia | `0x832705f381957C8218d7ae8B20A10d510B5AFB75` |
+
+CCTP V2 contracts (same on all testnets): TokenMessengerV2 `0x8FE6...2DAA`, MessageTransmitter `0xE737...E275`.
 
 ## Testing
 
 ```bash
-# Unit tests
+# Go tests
 go test ./...
 
-# Frontend type-check + build
-cd frontend && npx tsc --noEmit && npx vite build
+# Solidity tests
+cd contracts && forge test -vvv
+
+# Frontend build
+cd frontend && npm run build
 
 # Integration tests (hits live APIs)
-INTEGRATION=1 go test ./gateway/ -run TestSmoke -v
 INTEGRATION=1 go test ./cmd/server/ -v
-
-# On-chain smoke tests (requires funded wallets)
-SMOKE=1 go test ./gateway/ -run TestSelfmintFull -v -timeout 35m
 ```
 
-## Supported chains (testnet)
+## Invoice lifecycle
 
-| Chain | Chain ID | CCTP Domain | USDC | Swap tokens |
-|-------|----------|-------------|------|-------------|
-| Ethereum Sepolia | 11155111 | 0 | `0x1c7D...7238` | WETH, UNI |
-| Base Sepolia | 84532 | 6 | `0x036C...f7e` | WETH (limited liquidity) |
-| Unichain Sepolia | 1301 | 10 | `0x31d0...68f` | WETH |
+```
+paid → bridging → attesting → settled
+                                 ↓
+                            refunding → refunded
+```
 
-## Key contracts (same on all EVM testnet chains)
-
-| Contract | Address |
-|----------|---------|
-| Gateway Wallet | `0x0077777d7EBA4688BDeF3E311b846F25870A19B9` |
-| Gateway Minter | `0x0022222ABE238Cc2C7Bb1f21003F0a260052475B` |
-| TokenMessengerV2 | `0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA` |
-| ArcReceiver | `0x0A4eFeFbB7286D864cDDf6957642b2B11cd58f30` |
+Each status transition is tracked with transaction hashes (source chain + Arc settlement + refund). The dashboard auto-refreshes every 10 seconds.

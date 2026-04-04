@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useAccount } from "wagmi";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getMerchantBalances, listInvoices, sweep, refund, getChains } from "@/lib/api";
+import { getMerchantBalances, listInvoices, supply, withdraw, refund, getChains } from "@/lib/api";
 import { shortenAddress, formatUSDC } from "@/lib/format";
 import { chainName, txExplorerURL, arcTxURL } from "@/lib/chains";
 import type { ChainInfo } from "@/types/chain";
@@ -38,36 +38,70 @@ export function DashboardPage() {
     queryFn: getChains,
   });
 
-  const [sweeping, setSweeping] = useState(false);
-  const [sweepResult, setSweepResult] = useState<string | null>(null);
-  const [sweepError, setSweepError] = useState("");
-  const [sweepAmount, setSweepAmount] = useState("");
+  // Supply state
+  const [supplying, setSupplying] = useState(false);
+  const [supplyResult, setSupplyResult] = useState<string | null>(null);
+  const [supplyError, setSupplyError] = useState("");
+  const [supplyAmount, setSupplyAmount] = useState("");
+
+  // Withdraw state
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawResult, setWithdrawResult] = useState<string | null>(null);
+  const [withdrawError, setWithdrawError] = useState("");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
 
   const totalHuman = balances ? formatUSDC(balances.total) : "0";
   const arcBalance = balances?.balances.find((b) => b.chainId === ARC_CHAIN_ID);
   const arcAmount = arcBalance?.balance ?? "0";
   const hasArcFunds = arcAmount !== "0";
+  const compoundAmount = balances?.compound ?? "0";
+  const hasCompoundFunds = compoundAmount !== "0";
 
-  // Convert human input (e.g. "1.5") to base units (e.g. "1500000").
-  const sweepBaseUnits = sweepAmount
-    ? String(Math.floor(parseFloat(sweepAmount) * 1_000_000))
-    : "0";
-  const sweepValid = parseFloat(sweepAmount) > 0 && BigInt(sweepBaseUnits) <= BigInt(arcAmount);
+  function humanToBaseUnits(human: string): string {
+    if (!human) return "0";
+    const parts = human.split(".");
+    const whole = parts[0] || "0";
+    const frac = (parts[1] || "").padEnd(6, "0").slice(0, 6);
+    return (BigInt(whole) * 1_000_000n + BigInt(frac)).toString();
+  }
 
-  async function handleSweep() {
-    if (!sweepValid) return;
-    setSweeping(true);
-    setSweepError("");
-    setSweepResult(null);
+  const supplyBaseUnits = humanToBaseUnits(supplyAmount);
+  const supplyValid = supplyBaseUnits !== "0" && BigInt(supplyBaseUnits) <= BigInt(arcAmount);
+
+  const withdrawBaseUnits = humanToBaseUnits(withdrawAmount);
+  const withdrawValid = withdrawBaseUnits !== "0" && BigInt(withdrawBaseUnits) <= BigInt(compoundAmount);
+
+  async function handleSupply() {
+    if (!supplyValid) return;
+    setSupplying(true);
+    setSupplyError("");
+    setSupplyResult(null);
     try {
-      const res = await sweep(sweepBaseUnits);
-      setSweepResult(res.txHash);
-      setSweepAmount("");
+      const res = await supply(supplyBaseUnits);
+      setSupplyResult(res.txHash);
+      setSupplyAmount("");
       setTimeout(() => queryClient.invalidateQueries({ queryKey: ["merchant-balances"] }), 3000);
     } catch (err) {
-      setSweepError(err instanceof Error ? err.message : "Sweep failed");
+      setSupplyError(err instanceof Error ? err.message : "Supply failed");
     } finally {
-      setSweeping(false);
+      setSupplying(false);
+    }
+  }
+
+  async function handleWithdraw() {
+    if (!withdrawValid) return;
+    setWithdrawing(true);
+    setWithdrawError("");
+    setWithdrawResult(null);
+    try {
+      const res = await withdraw(withdrawBaseUnits);
+      setWithdrawResult(res.txHash);
+      setWithdrawAmount("");
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ["merchant-balances"] }), 3000);
+    } catch (err) {
+      setWithdrawError(err instanceof Error ? err.message : "Withdraw failed");
+    } finally {
+      setWithdrawing(false);
     }
   }
 
@@ -140,94 +174,97 @@ export function DashboardPage() {
         </div>
       </div>
 
-      {/* Sweep to Compound */}
-      <div className="rounded-lg border border-border bg-card p-6 space-y-4">
-        <div>
-          <h2 className="text-lg font-semibold">Stake to Compound V3</h2>
-          <p className="text-sm text-muted-foreground">
-            Bridge USDC from Arc to Ethereum Sepolia and supply to the Compound lending vault.
-          </p>
-        </div>
-
+      {/* Supply & Withdraw */}
+      <div className="rounded-lg border border-border bg-card p-6 space-y-6">
+        {/* Supply to Compound */}
         <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-muted-foreground">Available on Arc</p>
-              <p className="text-xl font-bold">
-                {balancesLoading ? "..." : `${formatUSDC(arcAmount)} USDC`}
-              </p>
-            </div>
+          <div>
+            <h2 className="text-lg font-semibold">Supply to Compound V3</h2>
+            <p className="text-sm text-muted-foreground">
+              Bridge USDC from Arc to Ethereum Sepolia and supply to the lending vault.
+            </p>
           </div>
 
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">Sweep amount</span>
-              <span className="font-mono font-bold">
-                {sweepAmount ? `${sweepAmount} USDC` : "0 USDC"}
-              </span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max={arcAmount}
-              step="10000"
-              value={sweepAmount ? String(Math.floor(parseFloat(sweepAmount) * 1_000_000)) : "0"}
-              onChange={(e) => {
-                const val = parseInt(e.target.value);
-                setSweepAmount(val > 0 ? (val / 1_000_000).toFixed(2) : "");
-              }}
-              disabled={sweeping || !hasArcFunds}
-              className="w-full h-2 rounded-full appearance-none cursor-pointer bg-border accent-primary disabled:opacity-50 disabled:cursor-not-allowed"
-            />
-            <div className="flex items-center gap-3">
-              <div className="relative flex-1">
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  placeholder="0.00"
-                  value={sweepAmount}
-                  onChange={(e) => setSweepAmount(e.target.value)}
-                  disabled={sweeping || !hasArcFunds}
-                  className="w-full rounded-md border border-border bg-background px-3 py-2.5 text-sm font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
-                />
-                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
-                  USDC
-                </span>
-              </div>
-              <button
-                onClick={() => setSweepAmount(formatUSDC(arcAmount))}
-                disabled={sweeping || !hasArcFunds}
-                className="rounded-md border border-border px-3 py-2.5 text-xs font-medium text-muted-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                Max
-              </button>
-              <button
-                onClick={handleSweep}
-                disabled={sweeping || !sweepValid || balancesLoading}
-                className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {sweeping ? "Sweeping..." : "Sweep"}
-              </button>
-            </div>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">Available on Arc: <span className="font-bold text-foreground">{balancesLoading ? "..." : `${formatUSDC(arcAmount)} USDC`}</span></span>
+            <span className="font-mono font-bold">{supplyAmount ? `${supplyAmount} USDC` : ""}</span>
           </div>
+          <input
+            type="range" min="0" max={arcAmount} step="10000"
+            value={supplyBaseUnits}
+            onChange={(e) => { const val = parseInt(e.target.value); setSupplyAmount(val > 0 ? (val / 1_000_000).toFixed(2) : ""); }}
+            disabled={supplying || !hasArcFunds}
+            className="w-full h-2 rounded-full appearance-none cursor-pointer bg-border accent-primary disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+          <div className="flex items-center gap-3">
+            <div className="relative flex-1">
+              <input type="text" inputMode="decimal" placeholder="0.00" value={supplyAmount}
+                onChange={(e) => { if (/^\d*\.?\d*$/.test(e.target.value)) setSupplyAmount(e.target.value); }}
+                disabled={supplying || !hasArcFunds}
+                className="w-full rounded-md border border-border bg-background px-3 py-2.5 text-sm font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">USDC</span>
+            </div>
+            <button onClick={() => setSupplyAmount(formatUSDC(arcAmount))} disabled={supplying || !hasArcFunds}
+              className="rounded-md border border-border px-3 py-2.5 text-xs font-medium text-muted-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Max</button>
+            <button onClick={handleSupply} disabled={supplying || !supplyValid || balancesLoading}
+              className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              {supplying ? "Supplying..." : "Supply"}
+            </button>
+          </div>
+          {supplyResult && (
+            <div className="rounded-md border border-success/30 bg-success/5 p-3 text-sm text-success">
+              Supply initiated! <a href={arcTxURL(supplyResult)} target="_blank" rel="noopener noreferrer" className="underline font-mono hover:opacity-80">View transaction</a>
+            </div>
+          )}
+          {supplyError && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{supplyError}</div>}
         </div>
 
-        {sweepResult && (
-          <div className="rounded-md border border-success/30 bg-success/5 p-3 text-sm text-success">
-            Sweep initiated!{" "}
-            <a href={`https://testnet.explorer.arc.network/tx/${sweepResult}`} target="_blank" rel="noopener noreferrer" className="underline font-mono hover:opacity-80">
-              View transaction
-            </a>
-            <br />
-            <span className="text-xs">CCTP bridging in progress. Funds will appear in Compound after attestation (~5 min).</span>
+        <hr className="border-border" />
+
+        {/* Withdraw from Compound */}
+        <div className="space-y-3">
+          <div>
+            <h2 className="text-lg font-semibold">Withdraw from Compound V3</h2>
+            <p className="text-sm text-muted-foreground">
+              Withdraw USDC from the lending vault and bridge back to Arc.
+            </p>
           </div>
-        )}
-        {sweepError && (
-          <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-            {sweepError}
+
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">In vault: <span className="font-bold text-foreground">{balancesLoading ? "..." : `${formatUSDC(compoundAmount)} USDC`}</span></span>
+            <span className="font-mono font-bold">{withdrawAmount ? `${withdrawAmount} USDC` : ""}</span>
           </div>
-        )}
+          <input
+            type="range" min="0" max={compoundAmount} step="10000"
+            value={withdrawBaseUnits}
+            onChange={(e) => { const val = parseInt(e.target.value); setWithdrawAmount(val > 0 ? (val / 1_000_000).toFixed(2) : ""); }}
+            disabled={withdrawing || !hasCompoundFunds}
+            className="w-full h-2 rounded-full appearance-none cursor-pointer bg-border accent-primary disabled:opacity-50 disabled:cursor-not-allowed"
+          />
+          <div className="flex items-center gap-3">
+            <div className="relative flex-1">
+              <input type="text" inputMode="decimal" placeholder="0.00" value={withdrawAmount}
+                onChange={(e) => { if (/^\d*\.?\d*$/.test(e.target.value)) setWithdrawAmount(e.target.value); }}
+                disabled={withdrawing || !hasCompoundFunds}
+                className="w-full rounded-md border border-border bg-background px-3 py-2.5 text-sm font-mono placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50"
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">USDC</span>
+            </div>
+            <button onClick={() => setWithdrawAmount(formatUSDC(compoundAmount))} disabled={withdrawing || !hasCompoundFunds}
+              className="rounded-md border border-border px-3 py-2.5 text-xs font-medium text-muted-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed transition-colors">Max</button>
+            <button onClick={handleWithdraw} disabled={withdrawing || !withdrawValid || balancesLoading}
+              className="rounded-md bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+              {withdrawing ? "Withdrawing..." : "Withdraw"}
+            </button>
+          </div>
+          {withdrawResult && (
+            <div className="rounded-md border border-success/30 bg-success/5 p-3 text-sm text-success">
+              Withdraw initiated! USDC will arrive on Arc after CCTP bridging.
+            </div>
+          )}
+          {withdrawError && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{withdrawError}</div>}
+        </div>
       </div>
 
       {/* Recent invoices */}

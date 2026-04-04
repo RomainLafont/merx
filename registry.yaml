@@ -120,3 +120,91 @@ chains:
       - symbol: USDC
         decimals: 6
         address: "0x4fCF1784B31630811181f670Aea7A7bEF803eaED"
+
+  - name: Linea Sepolia
+    chainId: 59141
+    cctpDomain: 11
+    rpc: "https://rpc.sepolia.linea.build"
+    explorer: "https://sepolia.lineascan.build"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0xFEce4462D57bD51A6A552365A011b95f0E16d9B7"
+
+  - name: Codex Testnet
+    chainId: 812242
+    cctpDomain: 12
+    rpc: "https://rpc.codex-stg.xyz"
+    explorer: "https://explorer.codex-stg.xyz"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0x6d7f141b6819C2c9CC2f818e6ad549E7Ca090F8f"
+
+  - name: Monad Testnet
+    chainId: 10143
+    cctpDomain: 15
+    rpc: "https://testnet-rpc.monad.xyz"
+    explorer: "https://testnet.monadexplorer.com"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0x534b2f3A21130d7a60830c2Df862319e593943A3"
+
+  - name: HyperEVM Testnet
+    chainId: 998
+    cctpDomain: 19
+    rpc: "https://rpc.hyperliquid-testnet.xyz/evm"
+    explorer: "https://testnet.purrsec.com"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0x2B3370eE501B4a559b57D449569354196457D8Ab"
+
+  - name: Ink Sepolia
+    chainId: 763373
+    cctpDomain: 21
+    rpc: "https://rpc-gel-sepolia.inkonchain.com"
+    explorer: "https://explorer-sepolia.inkonchain.com"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0xFabab97dCE620294D2B0b0e46C68964e326300Ac"
+
+  - name: Plume Testnet
+    chainId: 98867
+    cctpDomain: 22
+    rpc: "https://testnet-rpc.plume.org"
+    explorer: "https://testnet-explorer.plume.org"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0xcB5f30e335672893c7eb944B374c196392C19D18"
+
+  - name: EDGE Testnet
+    chainId: 33431
+    cctpDomain: 28
+    rpc: "https://edge-testnet.g.alchemy.com/public"
+    explorer: "https://edge-testnet.explorer.alchemy.com"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0x2d9F7CAD728051AA35Ecdc472a14cf8cDF5CFD6B"
+
+  - name: Morph Hoodi
+    chainId: 2910
+    cctpDomain: 30
+    rpc: "https://rpc-hoodi.morphl2.io"
+    explorer: "https://explorer-hoodi.morphl2.io"
+    uniswapSupported: false
+    tokens:
+      - symbol: USDC
+        decimals: 6
+        address: "0x7433b41C6c5e1d58D4Da99483609520255ab661B"

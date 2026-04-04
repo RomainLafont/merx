@@ -135,6 +135,7 @@ type Invoice struct {
 	AmountHuman     string     `json:"amountHuman"` // e.g. "100.00"
 	ChainID         int        `json:"chainId"`
 	Description     string     `json:"description"`
+	ProductID       string     `json:"productId,omitempty"`
 	PayerAddress    string     `json:"payerAddress,omitempty"`
 	Status          string     `json:"status"` // paid → bridging → attesting → settled
 	TxHash          string     `json:"txHash,omitempty"`
@@ -150,16 +151,46 @@ type Invoice struct {
 type invoiceStore struct {
 	mu       sync.RWMutex
 	invoices map[string]*Invoice
+	path     string // JSON file for persistence
 }
 
-func newInvoiceStore() *invoiceStore {
-	return &invoiceStore{invoices: make(map[string]*Invoice)}
+func newInvoiceStore(path string) *invoiceStore {
+	s := &invoiceStore{invoices: make(map[string]*Invoice), path: path}
+	s.load()
+	return s
+}
+
+func (s *invoiceStore) load() {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return
+	}
+	var invoices map[string]*Invoice
+	if err := json.Unmarshal(data, &invoices); err != nil {
+		log.Printf("[invoices] failed to load %s: %v", s.path, err)
+		return
+	}
+	s.invoices = invoices
+	log.Printf("[invoices] loaded %d invoices from %s", len(invoices), s.path)
+}
+
+// save writes the current invoices map to disk. Must be called with mu held.
+func (s *invoiceStore) save() {
+	data, err := json.MarshalIndent(s.invoices, "", "  ")
+	if err != nil {
+		log.Printf("[invoices] marshal error: %v", err)
+		return
+	}
+	if err := os.WriteFile(s.path, data, 0644); err != nil {
+		log.Printf("[invoices] write error: %v", err)
+	}
 }
 
 func (s *invoiceStore) create(inv *Invoice) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.invoices[inv.ID] = inv
+	s.save()
 }
 
 func (s *invoiceStore) get(id string) *Invoice {
@@ -173,6 +204,7 @@ func (s *invoiceStore) updateStatus(id, status string) {
 	defer s.mu.Unlock()
 	if inv, ok := s.invoices[id]; ok {
 		inv.Status = status
+		s.save()
 	}
 }
 
@@ -184,6 +216,26 @@ func (s *invoiceStore) setArcTx(id, arcTxHash string) {
 		inv.Status = "settled"
 		now := time.Now()
 		inv.SettledAt = &now
+		s.save()
+	}
+}
+
+func (s *invoiceStore) setRefundArcTx(id, txHash string, chainID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if inv, ok := s.invoices[id]; ok {
+		inv.RefundArcTxHash = txHash
+		inv.RefundChainID = chainID
+		s.save()
+	}
+}
+
+func (s *invoiceStore) setRefundTx(id, txHash string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if inv, ok := s.invoices[id]; ok {
+		inv.RefundTxHash = txHash
+		s.save()
 	}
 }
 
@@ -330,7 +382,7 @@ func main() {
 		depositForBurnABI: depositForBurnABI,
 		receiveMessageABI: receiveMessageABI,
 		relayAndSupplyABI: relayAndSupplyABI,
-		invoices:          newInvoiceStore(),
+		invoices:          newInvoiceStore("invoices.json"),
 		uniswap:           uniProxy,
 	}
 
@@ -341,7 +393,8 @@ func main() {
 	mux.HandleFunc("GET /api/pay-tx", s.handlePayTx)
 	mux.HandleFunc("POST /api/pay", s.handlePay)
 	mux.HandleFunc("POST /api/refund", s.handleRefund)
-	mux.HandleFunc("POST /api/sweep", s.handleSweep)
+	mux.HandleFunc("POST /api/supply", s.handleSweep)
+	mux.HandleFunc("POST /api/withdraw", s.handleWithdraw)
 
 	// Chain info.
 	mux.HandleFunc("GET /api/chains", s.handleChains)
@@ -350,6 +403,9 @@ func main() {
 	mux.HandleFunc("POST /api/invoices", s.handleCreateInvoice)
 	mux.HandleFunc("GET /api/invoices", s.handleListInvoices)
 	mux.HandleFunc("GET /api/invoices/{id}", s.handleGetInvoice)
+
+	// Ebook download.
+	mux.HandleFunc("GET /api/ebooks/{invoiceId}", s.handleEbookDownload)
 
 	// Dashboard.
 	mux.HandleFunc("GET /api/merchant/balances", s.handleMerchantBalances)
@@ -580,6 +636,50 @@ func (s *server) handleGetInvoice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, inv)
 }
 
+// Product ID → ebook filename mapping.
+var ebookFiles = map[string]string{
+	"mastering-solidity": "mastering_solidity.pdf",
+	"defi-handbook":      "defi_handbook.pdf",
+	"zero-knowledge":     "zero_knowledge_proofs.pdf",
+	"crypto-economics":   "cryptoeconomics_101.pdf",
+	"nft-art":            "nfts_digital_art.pdf",
+	"web3-security":      "web3_security_auditing.pdf",
+}
+
+func (s *server) handleEbookDownload(w http.ResponseWriter, r *http.Request) {
+	invoiceID := r.PathValue("invoiceId")
+	inv := s.invoices.get(invoiceID)
+	if inv == nil {
+		writeError(w, http.StatusNotFound, "invoice not found")
+		return
+	}
+
+	// Only allow download for paid (non-refunded) invoices.
+	if inv.Status == "pending" {
+		writeError(w, http.StatusForbidden, "invoice not paid")
+		return
+	}
+	if inv.RefundTxHash != "" || inv.RefundArcTxHash != "" {
+		writeError(w, http.StatusForbidden, "invoice has been refunded")
+		return
+	}
+
+	if inv.ProductID == "" {
+		writeError(w, http.StatusNotFound, "no product associated")
+		return
+	}
+
+	filename, ok := ebookFiles[inv.ProductID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "ebook not found for product: %s", inv.ProductID)
+		return
+	}
+
+	filepath := "ebooks/" + filename
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+	w.Header().Set("Content-Type", "application/pdf")
+	http.ServeFile(w, r, filepath)
+}
 
 // ---------------------------------------------------------------------------
 // Uniswap proxy handlers
@@ -909,6 +1009,7 @@ func (s *server) handlePay(w http.ResponseWriter, r *http.Request) {
 	inv := &Invoice{
 		ID:              uuid.New().String(),
 		MerchantAddress: s.signer.Hex(),
+		ProductID:       req.ProductID,
 		PayerAddress:    req.Owner,
 		Amount:          req.Amount,
 		AmountHuman:     amountHuman,
@@ -1070,6 +1171,7 @@ type payRequest struct {
 	Deadline    string `json:"deadline"`
 	Signature   string `json:"signature"`
 	Description string `json:"description"`
+	ProductID   string `json:"productId"`
 }
 
 type payResponse struct {
@@ -1178,12 +1280,7 @@ func (s *server) handleRefund(w http.ResponseWriter, r *http.Request) {
 
 	// Mark invoice as refunded with the Arc burn tx.
 	if req.InvoiceID != "" {
-		s.invoices.mu.Lock()
-		if inv := s.invoices.invoices[req.InvoiceID]; inv != nil {
-			inv.RefundArcTxHash = txHash
-			inv.RefundChainID = int(req.ChainID)
-		}
-		s.invoices.mu.Unlock()
+		s.invoices.setRefundArcTx(req.InvoiceID, txHash, int(req.ChainID))
 	}
 
 	// Background: poll CCTP attestation, then self-relay receiveMessage on destination.
@@ -1206,11 +1303,7 @@ func (s *server) handleRefund(w http.ResponseWriter, r *http.Request) {
 
 		// Update invoice with the destination chain relay tx.
 		if req.InvoiceID != "" {
-			s.invoices.mu.Lock()
-			if inv := s.invoices.invoices[req.InvoiceID]; inv != nil {
-				inv.RefundTxHash = relayTx
-			}
-			s.invoices.mu.Unlock()
+			s.invoices.setRefundTx(req.InvoiceID, relayTx)
 		}
 	}()
 
@@ -1360,6 +1453,145 @@ type sweepRequest struct {
 
 type sweepResponse struct {
 	TxHash string `json:"txHash"`
+}
+
+// POST /api/withdraw — withdraw USDC from Compound V3 on Ethereum Sepolia, bridge back to Arc.
+func (s *server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Amount string `json:"amount"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: %v", err)
+		return
+	}
+
+	if req.Amount == "" {
+		writeError(w, http.StatusBadRequest, "amount is required")
+		return
+	}
+
+	amount, ok := new(big.Int).SetString(req.Amount, 10)
+	if !ok || amount.Sign() <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid amount: %s", req.Amount)
+		return
+	}
+
+	ctx := r.Context()
+	sepoliaRPC := merx.RPCURLs[11155111]
+
+	ethClient, err := ethclient.DialContext(ctx, sepoliaRPC)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "dial Sepolia RPC: %v", err)
+		return
+	}
+	defer ethClient.Close()
+
+	auth, err := bind.NewKeyedTransactorWithChainID(s.key, big.NewInt(11155111))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create transactor: %v", err)
+		return
+	}
+	auth.Context = ctx
+
+	// Step 1: withdraw from Compound V3.
+	withdrawABI, _ := abi.JSON(strings.NewReader(`[{"type":"function","name":"withdraw","inputs":[{"name":"asset","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[]}]`))
+	sepoliaUSDC := merx.TestnetUSDC[0] // domain 0 = Ethereum Sepolia
+
+	withdrawData, err := withdrawABI.Pack("withdraw", sepoliaUSDC, amount)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "pack withdraw: %v", err)
+		return
+	}
+
+	cometContract := bind.NewBoundContract(merx.CompoundComet, withdrawABI, ethClient, ethClient, ethClient)
+	withdrawTx, err := cometContract.RawTransact(auth, withdrawData)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "broadcast withdraw: %v", err)
+		return
+	}
+
+	log.Printf("[withdraw] Compound withdraw broadcast: %s amount=%s", withdrawTx.Hash().Hex(), req.Amount)
+
+	// Wait for withdraw to be mined before bridging.
+	receipt, err := bind.WaitMined(ctx, ethClient, withdrawTx)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "withdraw wait: %v", err)
+		return
+	}
+	if receipt.Status != 1 {
+		writeError(w, http.StatusBadGateway, "withdraw reverted")
+		return
+	}
+
+	// Step 2: approve TokenMessenger on Eth Sepolia.
+	erc20ABI, _ := abi.JSON(strings.NewReader(`[{"type":"function","name":"approve","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"type":"bool"}]}]`))
+	approveData, err := erc20ABI.Pack("approve", merx.TokenMessengerV2, amount)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "pack approve: %v", err)
+		return
+	}
+
+	auth.Nonce = nil
+	approveTx, err := bind.NewBoundContract(sepoliaUSDC, erc20ABI, ethClient, ethClient, ethClient).RawTransact(auth, approveData)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "broadcast approve: %v", err)
+		return
+	}
+
+	approveReceipt, err := bind.WaitMined(ctx, ethClient, approveTx)
+	if err != nil || approveReceipt.Status != 1 {
+		writeError(w, http.StatusBadGateway, "approve failed")
+		return
+	}
+
+	// Step 3: depositForBurn on Eth Sepolia → Arc.
+	mintRecipient := addressToBytes32(s.signer)
+	var zeroCaller [32]byte
+
+	burnData, err := s.depositForBurnABI.Pack("depositForBurn",
+		amount,
+		merx.ArcDomain,
+		mintRecipient,
+		sepoliaUSDC,
+		zeroCaller,
+		merx.DefaultMaxFee,
+		uint32(0),
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "pack depositForBurn: %v", err)
+		return
+	}
+
+	auth.Nonce = nil
+	burnTx, err := bind.NewBoundContract(merx.TokenMessengerV2, s.depositForBurnABI, ethClient, ethClient, ethClient).RawTransact(auth, burnData)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "broadcast depositForBurn: %v", err)
+		return
+	}
+
+	txHash := burnTx.Hash().Hex()
+	log.Printf("[withdraw] depositForBurn broadcast: %s → Arc", txHash)
+
+	// Background: poll CCTP attestation, then self-relay on Arc.
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		message, attestation, err := s.pollCCTPAttestation(bgCtx, 0, txHash) // domain 0 = Eth Sepolia
+		if err != nil {
+			log.Printf("[withdraw] %v", err)
+			return
+		}
+
+		relayTx, err := s.relayCCTP(bgCtx, merx.ArcRPCURL, big.NewInt(merx.ArcChainID), merx.MessageTransmitter, message, attestation)
+		if err != nil {
+			log.Printf("[withdraw] relay on Arc: %v", err)
+			return
+		}
+		log.Printf("[withdraw] settled on Arc: %s", relayTx)
+	}()
+
+	writeJSON(w, http.StatusCreated, map[string]string{"txHash": txHash})
 }
 
 // getArcUSDCBalance returns the shop wallet's USDC balance on Arc.
