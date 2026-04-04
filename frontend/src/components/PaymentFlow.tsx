@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   useAccount,
   useReadContract,
+  useReadContracts,
   useSendTransaction,
   useWaitForTransactionReceipt,
   useWriteContract,
@@ -17,6 +18,7 @@ import type { Product } from "@/lib/products";
 import { getQuote, buildSwap, getPayTx, submitPay } from "@/lib/api";
 import { formatUSDC } from "@/lib/format";
 import { ChainSelector } from "./ChainSelector";
+import { TokenSelector } from "./TokenSelector";
 
 const ERC20_ABI = parseAbi([
   "function transfer(address to, uint256 amount) returns (bool)",
@@ -49,23 +51,51 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
   const [loadingQuote, setLoadingQuote] = useState(false);
 
   const chain = chains.find((c) => c.chainId === selectedChainId);
-  const swapTokens = chain?.tokens.filter((t) => t.symbol !== "USDC") ?? [];
-  const selectedToken: TokenEntry | undefined =
-    selectedSymbol === "USDC"
-      ? chain?.tokens.find((t) => t.symbol === "USDC")
-      : chain?.tokens.find((t) => t.symbol === selectedSymbol);
+  const allTokens = chain?.tokens ?? [];
+  const selectedToken: TokenEntry | undefined = chain?.tokens.find((t) => t.symbol === selectedSymbol);
   const usdcToken = chain?.tokens.find((t) => t.symbol === "USDC");
   const isDirectUSDC = selectedSymbol === "USDC";
 
-  // Read balance of selected token
-  const { data: tokenBalance, isLoading: balanceLoading, error: balanceError } = useReadContract({
-    address: (selectedToken?.address ?? undefined) as Hex | undefined,
+  // When invoice is created (chain selected), sync chainId and move to token selection
+  useEffect(() => {
+    if (invoice && step === "idle") {
+      setSelectedChainId(invoice.chainId);
+      setStep("select-token");
+    }
+  }, [invoice, step]);
+
+  // Read balances for ALL tokens on the chain in one multicall
+  const balanceContracts = allTokens.map((t) => ({
+    address: t.address as Hex,
     abi: erc20Abi,
-    functionName: "balanceOf",
+    functionName: "balanceOf" as const,
     args: address ? [address] : undefined,
     chainId: selectedChainId || undefined,
-    query: { enabled: !!address && !!selectedToken?.address && selectedChainId > 0 },
+  }));
+
+  const { data: allBalances, isLoading: balancesLoading } = useReadContracts({
+    contracts: balanceContracts,
+    query: { enabled: !!address && allTokens.length > 0 && selectedChainId > 0 },
   });
+
+  // Build a map of symbol → balance
+  const tokenBalances: Record<string, bigint> = {};
+  if (allBalances) {
+    allTokens.forEach((t, i) => {
+      const result = allBalances[i];
+      if (result?.status === "success" && result.result != null) {
+        tokenBalances[t.symbol] = result.result as bigint;
+      }
+    });
+  }
+
+  const tokenBalance = selectedToken ? tokenBalances[selectedSymbol] : undefined;
+  const balanceLoading = balancesLoading;
+
+  // Swap tokens: non-USDC tokens the user actually holds (balance > 0), on Uniswap-supported chains
+  const swapTokens = chain?.uniswapSupported
+    ? allTokens.filter((t) => t.symbol !== "USDC" && (tokenBalances[t.symbol] ?? 0n) > 0n)
+    : [];
 
   // Check Permit2 allowance for selected token (needed before swap)
   const { data: permit2Allowance } = useReadContract({
@@ -229,8 +259,10 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
       // (The nonce is read on-chain via useReadContract, but we need it dynamically)
       const nonceResp = await fetch(
         `https://${selectedChainId === 84532 ? "sepolia.base.org" : selectedChainId === 1301 ? "sepolia.unichain.org" : "ethereum-sepolia-rpc.publicnode.com"}`,
-        { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to: usdcToken.address, data: "0x7ecebe00" + address.slice(2).padStart(64, "0") }, "latest"], id: 1 }) }
+        {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", method: "eth_call", params: [{ to: usdcToken.address, data: "0x7ecebe00" + address.slice(2).padStart(64, "0") }, "latest"], id: 1 })
+        }
       );
       const nonceData = await nonceResp.json();
       const nonce = parseInt(nonceData.result, 16).toString();
@@ -342,45 +374,31 @@ export function PaymentFlow({ chains, product, merchantAddress, onPaid }: Props)
       {step === "select-token" && chain && (
         <div className="space-y-4">
 
-          {/* Token list */}
+          {/* Token selector */}
           <div className="space-y-2">
             <label className="block text-sm text-muted-foreground">Pay with</label>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => setSelectedSymbol("USDC")}
-                className={`rounded-md border px-4 py-2.5 text-sm font-medium transition-colors ${
-                  selectedSymbol === "USDC" ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:text-foreground"
-                }`}
-              >
+            {chain.uniswapSupported ? (
+              <>
+                <TokenSelector
+                  options={[
+                    ...(usdcToken ? [{ token: usdcToken, balance: tokenBalances["USDC"], isSwap: false }] : []),
+                    ...swapTokens.map((t) => ({ token: t, balance: tokenBalances[t.symbol], isSwap: true })),
+                  ]}
+                  selected={selectedSymbol}
+                  onSelect={setSelectedSymbol}
+                  loading={balancesLoading}
+                  formatBalance={formatTokenAmount}
+                />
+                {swapTokens.length === 0 && !balancesLoading && (
+                  <p className="text-xs text-muted-foreground">No other tokens found in your wallet on {chain.name}.</p>
+                )}
+              </>
+            ) : (
+              <div className="rounded-md border border-border bg-background px-3 py-2.5 text-sm font-medium text-foreground">
                 USDC
-              </button>
-              {chain.uniswapSupported && swapTokens.map((t) => (
-                <button
-                  key={t.symbol}
-                  onClick={() => setSelectedSymbol(t.symbol)}
-                  className={`rounded-md border px-4 py-2.5 text-sm font-medium transition-colors flex items-center gap-1.5 ${
-                    selectedSymbol === t.symbol ? "border-[#ff007a] bg-[#ff007a]/10 text-[#ff007a]" : "border-border text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  <img src="/uniswap.png" alt="" className="h-4 w-4" />
-                  {t.symbol}
-                </button>
-              ))}
-            </div>
-            {!chain.uniswapSupported && (
-              <p className="text-xs text-muted-foreground">Swap not available on {chain.name} — only direct USDC payment is supported.</p>
+              </div>
             )}
           </div>
-
-          {/* Balance */}
-          {selectedToken && (
-            <div className="rounded-md border border-border bg-secondary/50 px-3 py-2 flex justify-between text-sm">
-              <span className="text-muted-foreground">Your {selectedSymbol} balance</span>
-              <span className="font-medium">
-                {balanceLoading ? "Loading..." : balanceError ? "Failed to load" : tokenBalance !== undefined ? `${formatTokenAmount(tokenBalance.toString(), selectedToken.decimals)} ${selectedSymbol}` : "\u2014"}
-              </span>
-            </div>
-          )}
 
           {/* Action button */}
           {isDirectUSDC ? (
