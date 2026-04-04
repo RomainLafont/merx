@@ -41,6 +41,15 @@ export function payInvoice(
   });
 }
 
+// Gateway
+export function getGatewayBalances(): Promise<{
+  depositor: string;
+  total: string;
+  domains: Array<{ domain: number; chain: string; balance: string }>;
+}> {
+  return request("/api/gateway/balances");
+}
+
 // Uniswap
 export function getQuote(req: QuoteRequest): Promise<QuoteResponse> {
   return request("/api/uniswap/quote", {
