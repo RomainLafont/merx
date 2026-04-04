@@ -82,10 +82,13 @@ type tokenEntry struct {
 }
 
 type registryChain struct {
-	Name          string       `yaml:"name" json:"name"`
-	ChainID       int          `yaml:"chainId" json:"chainId"`
-	RPC           string       `yaml:"rpc" json:"-"` // not exposed to frontend
-	Tokens        []tokenEntry `yaml:"tokens" json:"tokens"`
+	Name             string       `yaml:"name" json:"name"`
+	ChainID          int          `yaml:"chainId" json:"chainId"`
+	CCTPDomain       int          `yaml:"cctpDomain" json:"cctpDomain"`
+	RPC              string       `yaml:"rpc" json:"-"`
+	Explorer         string       `yaml:"explorer" json:"explorer"`
+	UniswapSupported bool         `yaml:"uniswapSupported" json:"uniswapSupported"`
+	Tokens           []tokenEntry `yaml:"tokens" json:"tokens"`
 }
 
 type registry struct {
@@ -567,17 +570,15 @@ func (s *server) bridgeToArc(chainID int, amountStr string) {
 		return
 	}
 
-	domain, ok := merx.ChainIDToDomain[uint64(chainID)]
-	if !ok {
-		log.Printf("[cctp-bridge] no CCTP domain for chain %d, skipping", chainID)
-		return
-	}
+	domain := uint32(rc.CCTPDomain)
 
-	cctpUSDC, ok := merx.TestnetUSDC[domain]
-	if !ok {
-		log.Printf("[cctp-bridge] no CCTP USDC for domain %d", domain)
+	// Find USDC address from registry tokens.
+	usdcAddr := usdcAddressForChain(chainID)
+	if usdcAddr == "" {
+		log.Printf("[cctp-bridge] no USDC for chain %d", chainID)
 		return
 	}
+	cctpUSDC := common.HexToAddress(usdcAddr)
 
 	amount, ok := new(big.Int).SetString(amountStr, 10)
 	if !ok || amount.Sign() <= 0 {

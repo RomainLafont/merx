@@ -16,6 +16,7 @@ import type { ChainInfo, TokenEntry } from "@/types/chain";
 import type { Product } from "@/lib/products";
 import { getQuote, buildSwap, payInvoice } from "@/lib/api";
 import { formatUSDC } from "@/lib/format";
+import { ChainSelector } from "./ChainSelector";
 
 const ERC20_ABI = parseAbi([
   "function transfer(address to, uint256 amount) returns (bool)",
@@ -24,7 +25,7 @@ const ERC20_ABI = parseAbi([
 const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Hex;
 const MAX_UINT256 = 2n ** 256n - 1n;
 
-type Step = "select-chain" | "select-token" | "quote" | "approving-permit2" | "signing-permit" | "swapping" | "transferring" | "done" | "error";
+type Step = "idle" | "select-token" | "quote" | "approving-permit2" | "signing-permit" | "swapping" | "transferring" | "done" | "error";
 
 interface Props {
   invoice: Invoice | null;
@@ -40,7 +41,7 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
   const { address } = useAccount();
   const currentChainId = useChainId();
   const { switchChain } = useSwitchChain();
-  const [step, setStep] = useState<Step>("select-chain");
+  const [step, setStep] = useState<Step>("idle");
   const [selectedChainId, setSelectedChainId] = useState(0);
   const [selectedSymbol, setSelectedSymbol] = useState("USDC");
   const [quote, setQuote] = useState<QuoteResponse | null>(null);
@@ -58,7 +59,7 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
 
   // When invoice is created (chain selected), sync chainId and move to token selection
   useEffect(() => {
-    if (invoice && step === "select-chain") {
+    if (invoice && step === "idle") {
       setSelectedChainId(invoice.chainId);
       setStep("select-token");
     }
@@ -167,13 +168,12 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
     onSelectChain(chainId);
   }
 
-  function handleChangeChain() {
-    setStep("select-chain");
-    setSelectedChainId(0);
+  function handleChangeChain(chainId: number) {
     setSelectedSymbol("USDC");
     setQuote(null);
     setError("");
     onReset();
+    handleChainSelect(chainId);
   }
 
   const fetchQuote = useCallback(async () => {
@@ -256,34 +256,23 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
 
   return (
     <div className="space-y-4">
-      {/* Step 1: Chain selection */}
-      {step === "select-chain" && (
-        <div className="space-y-3">
-          <label className="block text-sm text-muted-foreground">Select network</label>
-          <div className="flex flex-wrap gap-2">
-            {chains.map((c) => (
-              <button
-                key={c.chainId}
-                onClick={() => handleChainSelect(c.chainId)}
-                disabled={creating}
-                className="rounded-md border border-border px-4 py-2.5 text-sm font-medium text-muted-foreground hover:text-foreground hover:border-primary/40 transition-colors disabled:opacity-50"
-              >
-                {c.name}
-              </button>
-            ))}
-          </div>
-          {creating && <p className="text-xs text-muted-foreground">Switching network & preparing...</p>}
+      {/* Chain selector — always visible during selection steps */}
+      {(step === "idle" || step === "select-token" || step === "quote") && (
+        <div className="space-y-2">
+          <label className="block text-sm text-muted-foreground">Network</label>
+          <ChainSelector
+            chains={chains}
+            selected={chain}
+            onSelect={(id) => chain?.chainId === id ? undefined : handleChangeChain(id)}
+            disabled={creating}
+          />
+          {creating && <p className="text-xs text-muted-foreground">Switching network...</p>}
         </div>
       )}
 
-      {/* Step 2: Token selection */}
+      {/* Token selection */}
       {step === "select-token" && chain && (
         <div className="space-y-4">
-          {/* Current chain + change button */}
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">Network: <span className="text-foreground font-medium">{chain.name}</span></span>
-            <button onClick={handleChangeChain} className="text-xs text-primary hover:underline">Change</button>
-          </div>
 
           {/* Token list */}
           <div className="space-y-2">
@@ -297,18 +286,22 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
               >
                 USDC
               </button>
-              {swapTokens.map((t) => (
+              {chain.uniswapSupported && swapTokens.map((t) => (
                 <button
                   key={t.symbol}
                   onClick={() => setSelectedSymbol(t.symbol)}
-                  className={`rounded-md border px-4 py-2.5 text-sm font-medium transition-colors ${
-                    selectedSymbol === t.symbol ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:text-foreground"
+                  className={`rounded-md border px-4 py-2.5 text-sm font-medium transition-colors flex items-center gap-1.5 ${
+                    selectedSymbol === t.symbol ? "border-[#ff007a] bg-[#ff007a]/10 text-[#ff007a]" : "border-border text-muted-foreground hover:text-foreground"
                   }`}
                 >
+                  <img src="/uniswap.png" alt="" className="h-4 w-4" />
                   {t.symbol}
                 </button>
               ))}
             </div>
+            {!chain.uniswapSupported && (
+              <p className="text-xs text-muted-foreground">Swap not available on {chain.name} — only direct USDC payment is supported.</p>
+            )}
           </div>
 
           {/* Balance */}
@@ -334,8 +327,9 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
             <button
               onClick={fetchQuote}
               disabled={loadingQuote}
-              className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              className="w-full rounded-md bg-[#ff007a] px-4 py-2 text-sm font-medium text-white hover:bg-[#ff007a]/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
             >
+              <img src="/uniswap.png" alt="" className="h-4 w-4" />
               {loadingQuote ? "Getting quote..." : `Get ${selectedSymbol} Quote`}
             </button>
           )}
@@ -345,11 +339,6 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
       {/* Step 3: Quote display */}
       {step === "quote" && quote && selectedToken && chain && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">Network: <span className="text-foreground font-medium">{chain.name}</span></span>
-            <button onClick={handleChangeChain} className="text-xs text-primary hover:underline">Change</button>
-          </div>
-
           <div className="rounded-lg border border-border bg-secondary/50 p-4 space-y-2">
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">You pay</span>
@@ -379,11 +368,17 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
             )}
           </div>
 
-          <p className="text-xs text-muted-foreground text-center">One signature + swap + transfer to merchant.</p>
+          <div className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+            <img src="/uniswap.png" alt="" className="h-3.5 w-3.5" />
+            <span>Powered by Uniswap</span>
+          </div>
 
           <div className="flex gap-2">
             <button onClick={() => { setStep("select-token"); setQuote(null); }} className="flex-1 rounded-md border border-border px-4 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors">Back</button>
-            <button onClick={handlePayWithSwap} className="flex-1 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors">Swap & Pay</button>
+            <button onClick={handlePayWithSwap} className="flex-1 rounded-md bg-[#ff007a] px-4 py-2 text-sm font-medium text-white hover:bg-[#ff007a]/90 transition-colors flex items-center justify-center gap-2">
+              <img src="/uniswap.png" alt="" className="h-4 w-4" />
+              Swap & Pay
+            </button>
           </div>
         </div>
       )}
@@ -407,9 +402,22 @@ export function PaymentFlow({ invoice, chains, product, creating, onSelectChain,
       {step === "transferring" && (
         <StatusMessage status="pending">{transferPending ? "Confirm transfer in wallet..." : "Waiting for transfer confirmation..."}</StatusMessage>
       )}
-      {step === "done" && (
-        <StatusMessage status="success">Payment confirmed! Transaction: {(swapHash ?? transferHash)?.slice(0, 10)}...</StatusMessage>
-      )}
+      {step === "done" && (() => {
+        const txHash = swapHash ?? transferHash;
+        const explorerUrl = chain?.explorer && txHash ? `${chain.explorer}/tx/${txHash}` : undefined;
+        return (
+          <StatusMessage status="success">
+            Payment confirmed!{" "}
+            {explorerUrl ? (
+              <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">
+                View transaction
+              </a>
+            ) : (
+              <span className="font-mono">{txHash?.slice(0, 10)}...</span>
+            )}
+          </StatusMessage>
+        );
+      })()}
       {step === "error" && (
         <div className="space-y-2">
           <StatusMessage status="error">{error}</StatusMessage>
