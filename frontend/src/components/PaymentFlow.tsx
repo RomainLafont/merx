@@ -514,19 +514,27 @@ export function PaymentFlow({ chains, product, onPaid }: Props) {
         <StatusMessage status="pending">Payment confirmed on-chain! Waiting for settlement on Arc...</StatusMessage>
       )}
       {step === "done" && (() => {
-        const txHash = burnHash ?? swapHash ?? transferHash;
-        const explorerUrl = chain?.explorer && txHash ? `${chain.explorer}/tx/${txHash}` : undefined;
+        const explorer = chain?.explorer;
+        const swapUrl = explorer && swapHash ? `${explorer}/tx/${swapHash}` : undefined;
+        const burnUrl = explorer && burnHash ? `${explorer}/tx/${burnHash}` : undefined;
+        const transferUrl = explorer && transferHash ? `${explorer}/tx/${transferHash}` : undefined;
+        const hasSwapFlow = !!(swapHash && (burnHash || transferHash));
         return (
           <div className="space-y-3">
             <StatusMessage status="success">
-              Payment confirmed!{" "}
-              {explorerUrl ? (
-                <a href={explorerUrl} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">
-                  View transaction
-                </a>
-              ) : (
-                <span className="font-mono">{txHash?.slice(0, 10)}...</span>
-              )}
+              <div>
+                Payment confirmed!
+                {hasSwapFlow ? (
+                  <div className="flex gap-3 mt-1">
+                    {swapUrl && <a href={swapUrl} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">Swap tx</a>}
+                    {(burnUrl || transferUrl) && <a href={(burnUrl || transferUrl)!} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">Payment tx</a>}
+                  </div>
+                ) : (
+                  <>{" "}{(burnUrl || transferUrl) ? (
+                    <a href={(burnUrl || transferUrl)!} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">View transaction</a>
+                  ) : null}</>
+                )}
+              </div>
             </StatusMessage>
             {invoiceId && (
               <a
