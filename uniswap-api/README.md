@@ -28,7 +28,7 @@ swapper_address: "0xYourWallet"
 
 3. Build:
 ```bash
-go build ./cmd/merx
+go build ./uniswap-api/cmd/merx
 ```
 
 ## Usage
@@ -36,19 +36,19 @@ go build ./cmd/merx
 ### Get a quote (price check)
 
 ```bash
-go run ./cmd/merx -amount 100 -chain ethereum-sepolia
+go run ./uniswap-api/cmd/merx -amount 100 -chain ethereum-sepolia
 ```
 
 ### Get a quote for a specific token
 
 ```bash
-go run ./cmd/merx -amount 50 -token-out 0xfff9976782d46cc05630d1f6ebab18b2324d6b14 -chain ethereum-sepolia
+go run ./uniswap-api/cmd/merx -amount 50 -token-out 0xfff9976782d46cc05630d1f6ebab18b2324d6b14 -chain ethereum-sepolia
 ```
 
 ### Build an unsigned swap transaction
 
 ```bash
-go run ./cmd/merx -amount 100 -chain base-sepolia -swap
+go run ./uniswap-api/cmd/merx -amount 100 -chain base-sepolia -swap
 ```
 
 ### CLI Flags
@@ -66,24 +66,24 @@ go run ./cmd/merx -amount 100 -chain base-sepolia -swap
 ### Unit tests (no API key required)
 
 ```bash
-go test ./internal/uniswap/ -v
+go test ./uniswap-api/uniswap/ -v
 ```
 
 ### Integration tests (requires config.yaml)
 
 ```bash
-go test ./internal/uniswap/ -run Integration -v
+go test ./uniswap-api/uniswap/ -run Integration -v
 ```
 
 ## Project Structure
 
 ```
-cmd/merx/main.go           - CLI entry point
-internal/config/config.go   - YAML config loading
-internal/config/chains.go   - Chain definitions and registry
-internal/uniswap/client.go  - HTTP client
-internal/uniswap/types.go   - API request/response types
-internal/uniswap/quote.go   - GetQuote, GetPriceUSDC
-internal/uniswap/swap.go    - CreateSwap, CreateOrder
-internal/uniswap/approval.go - CheckApproval
+cmd/merx/main.go       CLI entry point
+config/config.go       YAML config loading
+config/chains.go       Chain definitions and registry
+uniswap/client.go      HTTP client
+uniswap/types.go       API request/response types
+uniswap/quote.go       GetQuote, GetPriceUSDC
+uniswap/swap.go        CreateSwap, CreateOrder
+uniswap/approval.go    CheckApproval
 ```
