@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" viewBox="0 0 680 560">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+    .th { font-size: 14px; font-weight: 600; }
+    .ts { font-size: 12px; font-weight: 400; }
+    .arr { stroke-width: 1.5; }
+
+    .bg { fill: #ffffff; }
+    .th-def { fill: #24292f; }
+    .ts-def { fill: #57606a; }
+    .arr { stroke: #57606a; }
+
+    .box-gray { fill: #f6f8fa; stroke: #d0d7de; }
+    .box-purple { fill: #f0edfe; stroke: #8b7fd4; }
+    .box-teal { fill: #dff5ee; stroke: #1d9e75; }
+    .box-blue { fill: #e6f1fb; stroke: #378add; }
+    .box-green { fill: #eaf3de; stroke: #639922; }
+
+    .th-gray { fill: #24292f; }  .ts-gray { fill: #57606a; }
+    .th-purple { fill: #3c3489; }  .ts-purple { fill: #534ab7; }
+    .th-teal { fill: #085041; }  .ts-teal { fill: #0f6e56; }
+    .th-blue { fill: #0c447c; }  .ts-blue { fill: #185fa5; }
+    .th-green { fill: #27500a; }  .ts-green { fill: #3b6d11; }
+
+    .dashed { stroke-dasharray: 4 3; }
+    .arrow-blue { stroke: #185fa5; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .th-def { fill: #e6edf3; }
+      .ts-def { fill: #8b949e; }
+      .arr { stroke: #8b949e; }
+
+      .box-gray { fill: #161b22; stroke: #30363d; }
+      .box-purple { fill: #1e1635; stroke: #8b7fd4; }
+      .box-teal { fill: #0a2e22; stroke: #1d9e75; }
+      .box-blue { fill: #0c1929; stroke: #378add; }
+      .box-green { fill: #112008; stroke: #639922; }
+
+      .th-gray { fill: #e6edf3; }  .ts-gray { fill: #8b949e; }
+      .th-purple { fill: #cecbf6; }  .ts-purple { fill: #afa9ec; }
+      .th-teal { fill: #9fe1cb; }  .ts-teal { fill: #5dcaa5; }
+      .th-blue { fill: #b5d4f4; }  .ts-blue { fill: #85b7eb; }
+      .th-green { fill: #c0dd97; }  .ts-green { fill: #97c459; }
+    }
+  </style>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="680" height="560" rx="8"/>
+
+  <!-- Merchant dashboard -->
+  <rect class="box-purple" x="190" y="30" width="300" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-purple" x="340" y="50" text-anchor="middle" dominant-baseline="central">Merchant dashboard</text>
+  <text class="ts ts-purple" x="340" y="68" text-anchor="middle" dominant-baseline="central">Balances, invoices, Compound</text>
+
+  <line x1="340" y1="86" x2="340" y2="116" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- Arc balance -->
+  <rect class="box-blue" x="220" y="118" width="240" height="44" rx="8" stroke-width="0.5"/>
+  <text class="th th-blue" x="340" y="140" text-anchor="middle" dominant-baseline="central">Arc USDC treasury</text>
+
+  <!-- Decision -->
+  <text class="ts ts-def" x="340" y="184" text-anchor="middle">Action?</text>
+
+  <!-- Left: Refund -->
+  <path d="M270 162 L130 162 L130 218" fill="none" class="arr" marker-end="url(#arrow)"/>
+  <text class="ts ts-def" x="185" y="198" text-anchor="middle">Refund</text>
+
+  <!-- Right: Supply -->
+  <path d="M410 162 L550 162 L550 218" fill="none" class="arr" marker-end="url(#arrow)"/>
+  <text class="ts ts-def" x="495" y="198" text-anchor="middle">Supply</text>
+
+  <!-- LEFT: Choose dest -->
+  <rect class="box-teal" x="30" y="220" width="200" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-teal" x="130" y="240" text-anchor="middle" dominant-baseline="central">Choose dest chain</text>
+  <text class="ts ts-teal" x="130" y="258" text-anchor="middle" dominant-baseline="central">Any of 18 chains</text>
+
+  <line x1="130" y1="276" x2="130" y2="306" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- LEFT: Estimate fee -->
+  <rect class="box-teal" x="30" y="308" width="200" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-teal" x="130" y="328" text-anchor="middle" dominant-baseline="central">Estimate fee</text>
+  <text class="ts ts-teal" x="130" y="346" text-anchor="middle" dominant-baseline="central">Circle fee API</text>
+
+  <line x1="130" y1="364" x2="130" y2="394" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- LEFT: Burn -->
+  <rect class="box-teal" x="20" y="396" width="220" height="56" rx="8" stroke-width="1"/>
+  <text class="th th-teal" x="130" y="416" text-anchor="middle" dominant-baseline="central">depositForBurnWithHook</text>
+  <text class="ts ts-teal" x="130" y="434" text-anchor="middle" dominant-baseline="central">amount + fee from Arc</text>
+
+  <line x1="130" y1="452" x2="130" y2="482" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- LEFT: Customer refunded -->
+  <rect class="box-gray" x="30" y="484" width="200" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-gray" x="130" y="504" text-anchor="middle" dominant-baseline="central">Customer refunded</text>
+  <text class="ts ts-gray" x="130" y="522" text-anchor="middle" dominant-baseline="central">Invoice set to refunded</text>
+
+  <!-- RIGHT: Supply -->
+  <rect class="box-teal" x="440" y="220" width="220" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-teal" x="550" y="240" text-anchor="middle" dominant-baseline="central">POST /api/supply</text>
+  <text class="ts ts-teal" x="550" y="258" text-anchor="middle" dominant-baseline="central">Burn Arc to Eth Sepolia</text>
+
+  <line x1="550" y1="276" x2="550" y2="306" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- RIGHT: CompoundDepositor -->
+  <rect class="box-green" x="430" y="308" width="240" height="56" rx="8" stroke-width="1"/>
+  <text class="th th-green" x="550" y="328" text-anchor="middle" dominant-baseline="central">CompoundDepositor.sol</text>
+  <text class="ts ts-green" x="550" y="346" text-anchor="middle" dominant-baseline="central">Relay CCTP + supply</text>
+
+  <line x1="550" y1="364" x2="550" y2="394" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- RIGHT: Compound position -->
+  <rect class="box-green" x="440" y="396" width="220" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-green" x="550" y="416" text-anchor="middle" dominant-baseline="central">Compound V3 position</text>
+  <text class="ts ts-green" x="550" y="434" text-anchor="middle" dominant-baseline="central">Earning APY on USDC</text>
+
+  <!-- Return arrow -->
+  <path d="M550 452 L550 484 L340 484 L340 162" fill="none" class="arrow-blue dashed" stroke-width="0.8" marker-end="url(#arrow)"/>
+  <text class="ts ts-def" x="445" y="500" text-anchor="middle">POST /api/withdraw back to Arc</text>
+</svg>

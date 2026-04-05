@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" viewBox="0 0 680 580">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+    .th { font-size: 14px; font-weight: 600; }
+    .ts { font-size: 12px; font-weight: 400; }
+    .arr { stroke-width: 1.5; }
+
+    /* Light mode defaults */
+    .bg { fill: #ffffff; }
+    .th { fill: #24292f; }
+    .ts { fill: #57606a; }
+    .arr { stroke: #57606a; }
+    .leader { stroke: #8b949e; stroke-width: 0.5; stroke-dasharray: 3 2; }
+
+    .box-gray-fill { fill: #f6f8fa; stroke: #d0d7de; }
+    .box-purple-fill { fill: #f0edfe; stroke: #8b7fd4; }
+    .box-teal-fill { fill: #dff5ee; stroke: #1d9e75; }
+    .box-coral-fill { fill: #faece7; stroke: #d85a30; }
+    .box-blue-fill { fill: #e6f1fb; stroke: #378add; }
+    .box-green-fill { fill: #eaf3de; stroke: #639922; }
+
+    .th-purple { fill: #3c3489; }
+    .ts-purple { fill: #534ab7; }
+    .th-teal { fill: #085041; }
+    .ts-teal { fill: #0f6e56; }
+    .th-coral { fill: #712b13; }
+    .ts-coral { fill: #993c1d; }
+    .th-blue { fill: #0c447c; }
+    .ts-blue { fill: #185fa5; }
+    .th-green { fill: #27500a; }
+    .ts-green { fill: #3b6d11; }
+    .th-gray { fill: #24292f; }
+    .ts-gray { fill: #57606a; }
+
+    .accent-teal { stroke: #1d9e75; }
+    .accent-coral { stroke: #d85a30; }
+    .note-teal { fill: #0f6e56; }
+    .note-coral { fill: #993c1d; }
+
+    .dashed { stroke-dasharray: 3 2; }
+    .arrow-coral { stroke: #d85a30; }
+    .arrow-blue { stroke: #185fa5; }
+
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .th { fill: #e6edf3; }
+      .ts { fill: #8b949e; }
+      .arr { stroke: #8b949e; }
+      .leader { stroke: #484f58; }
+
+      .box-gray-fill { fill: #161b22; stroke: #30363d; }
+      .box-purple-fill { fill: #1e1635; stroke: #8b7fd4; }
+      .box-teal-fill { fill: #0a2e22; stroke: #1d9e75; }
+      .box-coral-fill { fill: #2a1510; stroke: #d85a30; }
+      .box-blue-fill { fill: #0c1929; stroke: #378add; }
+      .box-green-fill { fill: #112008; stroke: #639922; }
+
+      .th-purple { fill: #cecbf6; }
+      .ts-purple { fill: #afa9ec; }
+      .th-teal { fill: #9fe1cb; }
+      .ts-teal { fill: #5dcaa5; }
+      .th-coral { fill: #f5c4b3; }
+      .ts-coral { fill: #f0997b; }
+      .th-blue { fill: #b5d4f4; }
+      .ts-blue { fill: #85b7eb; }
+      .th-green { fill: #c0dd97; }
+      .ts-green { fill: #97c459; }
+      .th-gray { fill: #e6edf3; }
+      .ts-gray { fill: #8b949e; }
+
+      .note-teal { fill: #5dcaa5; }
+      .note-coral { fill: #f0997b; }
+    }
+  </style>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="680" height="580" rx="8"/>
+
+  <!-- Frontend -->
+  <rect class="box-gray-fill" x="140" y="30" width="400" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-gray" x="340" y="50" text-anchor="middle" dominant-baseline="central">Frontend (React + Vite + TypeScript)</text>
+  <text class="ts ts-gray" x="340" y="68" text-anchor="middle" dominant-baseline="central">Shop, checkout, merchant dashboard</text>
+
+  <!-- Arrow Frontend to Go API -->
+  <line x1="340" y1="86" x2="340" y2="126" class="arr" marker-end="url(#arrow)"/>
+  <text class="ts" x="355" y="110" text-anchor="start">/api/*</text>
+
+  <!-- Go API -->
+  <rect class="box-purple-fill" x="140" y="128" width="400" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-purple" x="340" y="148" text-anchor="middle" dominant-baseline="central">Go API server</text>
+  <text class="ts ts-purple" x="340" y="166" text-anchor="middle" dominant-baseline="central">Calldata, invoices, polling, proxy</text>
+
+  <!-- Arrow Go API to Circle -->
+  <path d="M240 184 L240 210 L175 210 L175 256" fill="none" class="arr" marker-end="url(#arrow)"/>
+  <!-- Arrow Go API to Uniswap -->
+  <path d="M440 184 L440 210 L505 210 L505 256" fill="none" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- Circle CCTP V2 -->
+  <rect class="box-teal-fill" x="40" y="258" width="270" height="56" rx="8" stroke-width="1.5"/>
+  <text class="th th-teal" x="175" y="278" text-anchor="middle" dominant-baseline="central">Circle CCTP V2 + forwarding</text>
+  <text class="ts ts-teal" x="175" y="296" text-anchor="middle" dominant-baseline="central">Native burn/mint bridging</text>
+
+  <!-- Uniswap -->
+  <rect class="box-coral-fill" x="370" y="258" width="270" height="56" rx="8" stroke-width="1.5"/>
+  <text class="th th-coral" x="505" y="278" text-anchor="middle" dominant-baseline="central">Uniswap Trading API</text>
+  <text class="ts ts-coral" x="505" y="296" text-anchor="middle" dominant-baseline="central">Quotes + Permit2 swaps</text>
+
+  <!-- Dashed arrow Uniswap to Circle -->
+  <path d="M370 286 L316 286" fill="none" class="arrow-coral dashed" stroke-width="1" marker-end="url(#arrow)"/>
+  <text class="ts ts-coral" x="343" y="278" text-anchor="middle">USDC</text>
+
+  <!-- Circle annotation -->
+  <line x1="56" y1="324" x2="56" y2="372" class="accent-teal" stroke-width="2.5" stroke-linecap="round"/>
+  <text class="ts note-teal" x="66" y="336">No custom contract on 18 chains</text>
+  <text class="ts note-teal" x="66" y="352">Settlement in canonical USDC</text>
+  <text class="ts note-teal" x="66" y="368">Fee-based forwarding to Arc</text>
+
+  <!-- Uniswap annotation -->
+  <line x1="386" y1="324" x2="386" y2="372" class="accent-coral" stroke-width="2.5" stroke-linecap="round"/>
+  <text class="ts note-coral" x="396" y="336">Accept any ERC-20 as payment</text>
+  <text class="ts note-coral" x="396" y="352">No in-house DEX routing</text>
+  <text class="ts note-coral" x="396" y="368">3 chains: Sepolia, Base, Unichain</text>
+
+  <!-- Arrow Circle to Arc -->
+  <path d="M175 314 L175 394 L220 394 L220 436" fill="none" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- Arc Testnet -->
+  <rect class="box-blue-fill" x="120" y="438" width="200" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-blue" x="220" y="458" text-anchor="middle" dominant-baseline="central">Arc Testnet</text>
+  <text class="ts ts-blue" x="220" y="476" text-anchor="middle" dominant-baseline="central">Settlement hub</text>
+
+  <!-- Arrow Arc to Compound -->
+  <line x1="320" y1="466" x2="360" y2="466" class="arr" marker-end="url(#arrow)"/>
+
+  <!-- Compound V3 -->
+  <rect class="box-green-fill" x="362" y="438" width="220" height="56" rx="8" stroke-width="0.5"/>
+  <text class="th th-green" x="472" y="458" text-anchor="middle" dominant-baseline="central">Compound V3</text>
+  <text class="ts ts-green" x="472" y="476" text-anchor="middle" dominant-baseline="central">Ethereum Sepolia treasury</text>
+
+  <!-- Return arrow Compound to Arc -->
+  <path d="M472 494 L472 520 L220 520 L220 494" fill="none" class="arrow-blue dashed" stroke-width="0.8" marker-end="url(#arrow)"/>
+  <text class="ts" x="346" y="535" text-anchor="middle">Withdraw + bridge back</text>
+
+  <!-- 18 chains label -->
+  <rect x="40" y="394" width="90" height="28" rx="6" fill="none" stroke-width="0.5" class="box-gray-fill dashed"/>
+  <text class="ts" x="85" y="411" text-anchor="middle">18 chains</text>
+  <line class="leader" x1="85" y1="394" x2="120" y2="314"/>
+</svg>
